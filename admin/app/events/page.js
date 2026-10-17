@@ -180,28 +180,33 @@ export default function EventsPage() {
     }
   };
 
+  const persistEvent = async () => {
+    let fieldMappings;
+    try {
+      fieldMappings = JSON.parse(mappingText || "{}");
+    } catch {
+      throw new Error("Field mappings must be valid JSON.");
+    }
+    const response = await fetch("/api/events", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...eventForm, fieldMappings }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.message || "Unable to save event.");
+    return data.event;
+  };
+
   const saveEvent = async () => {
     setBusy(true);
     setNotice("");
     try {
-      let fieldMappings;
-      try {
-        fieldMappings = JSON.parse(mappingText || "{}");
-      } catch {
-        throw new Error("Field mappings must be valid JSON.");
-      }
-      const response = await fetch("/api/events", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...eventForm, fieldMappings }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.message || "Unable to save event.");
-      setEventForm(cleanEvent(data.event));
-      setMappingText(JSON.stringify(data.event.fieldMappings || {}, null, 2));
-      setSelectedEventId(data.event.eventId);
+      const event = await persistEvent();
+      setEventForm(cleanEvent(event));
+      setMappingText(JSON.stringify(event.fieldMappings || {}, null, 2));
+      setSelectedEventId(event.eventId);
       await refreshEvents();
-      await refreshEventTools(data.event.eventId);
+      await refreshEventTools(event.eventId);
       setNotice("Event configuration saved.");
     } catch (error) {
       setNotice(error.message);
@@ -300,6 +305,12 @@ export default function EventsPage() {
     if (!selectedEventId) return setNotice("Save and select an event before queueing an operation.");
     setBusy(true);
     try {
+      const savedEvent = await persistEvent();
+      setEventForm(cleanEvent(savedEvent));
+      setMappingText(JSON.stringify(savedEvent.fieldMappings || {}, null, 2));
+      setSelectedEventId(savedEvent.eventId);
+      await refreshEvents();
+
       let attachment;
       if (otherAttachment) {
         if (otherAttachment.size > 6 * 1024 * 1024) throw new Error("Choose an attachment smaller than 6 MB.");
@@ -311,7 +322,7 @@ export default function EventsPage() {
         });
         attachment = { filename: otherAttachment.name, mimeType: otherAttachment.type, base64: dataUrl };
       }
-      const response = await fetch(`/api/events/${encodeURIComponent(selectedEventId)}/jobs`, {
+      const response = await fetch(`/api/events/${encodeURIComponent(savedEvent.eventId)}/jobs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -326,7 +337,7 @@ export default function EventsPage() {
       if (!response.ok) throw new Error(data.message || "Could not queue operation.");
       setActiveJob(data.job);
       setNotice(`${data.job.type} operation queued for ${data.job.recipientCount} recipients.`);
-      await refreshEventTools(selectedEventId);
+      await refreshEventTools(savedEvent.eventId);
       setActiveJob(data.job);
     } catch (error) {
       setNotice(error.message);

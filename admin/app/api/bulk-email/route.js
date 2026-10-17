@@ -4,8 +4,8 @@ import nodemailer from "nodemailer";
 import * as XLSX from "xlsx";
 import dbConnect from "@/lib/dbConnect";
 import BulkCampaign from "@/lib/models/BulkCampaign";
+import { getJwtSecret } from "@/lib/auth";
 
-const JWT_SECRET = process.env.JWT_SECRET;
 const VALID_EMAIL_DOMAIN = "@vit.edu";
 
 function normalizeText(value) {
@@ -15,10 +15,11 @@ function normalizeText(value) {
 function isAdminAuthenticated(req) {
   try {
     const token = req.cookies.get("token")?.value;
-    if (!token || !JWT_SECRET) {
+    const jwtSecret = getJwtSecret();
+    if (!token || !jwtSecret) {
       return null;
     }
-    return jwt.verify(token, JWT_SECRET);
+    return jwt.verify(token, jwtSecret);
   } catch {
     return null;
   }

@@ -72,11 +72,11 @@ export async function POST(req) {
   fieldMappings: mappings,
 
   "ticketTemplates.red": String(
-    body.ticketTemplates?.red || legacyTicketTemplate
+    body.ticketTemplates?.red ?? legacyTicketTemplate
   ).trim(),
 
   "ticketTemplates.blue": String(
-    body.ticketTemplates?.blue || legacyTicketTemplate
+    body.ticketTemplates?.blue ?? legacyTicketTemplate
   ).trim(),
 
   certificateTemplateUrl: String(

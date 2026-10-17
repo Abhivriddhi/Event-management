@@ -2,40 +2,58 @@ import { NextResponse } from "next/server";
 import dbConnect from "@/lib/dbConnect";
 import Admin from "@/lib/models/Admin";
 import RefreshToken from "@/lib/models/RefreshToken";
+import { getJwtSecret } from "@/lib/auth";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 
-const JWT_SECRET = process.env.JWT_SECRET;
-
 export async function POST(req) {
-  await dbConnect();
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ message: "A valid JSON request body is required." }, { status: 400 });
+  }
+
+  const email = typeof body?.email === "string" ? body.email.trim().toLowerCase() : "";
+  const password = typeof body?.password === "string" ? body.password : "";
+
+  if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    || !password || password.length > 1024) {
+    return NextResponse.json({ message: "A valid email and password are required." }, { status: 400 });
+  }
+
+  const jwtSecret = getJwtSecret();
+  if (!jwtSecret) {
+    console.error("Login failed: JWT_SECRET is missing or shorter than 32 bytes.");
+    return NextResponse.json({ message: "Authentication is not securely configured." }, { status: 500 });
+  }
+
+  let admin;
+  try {
+    await dbConnect();
+    admin = await Admin.findOne({ email });
+  } catch (error) {
+    console.error("Login database operation failed:", error?.name || "unknown error");
+    return NextResponse.json({ message: "Database unavailable." }, { status: 503 });
+  }
+
+  if (!admin) {
+    return NextResponse.json({ message: "Invalid email or password." }, { status: 401 });
+  }
 
   try {
-    const { email, password } = await req.json();
-
-    if (!email || !password) {
-      return NextResponse.json({ message: "Email and password are required." }, { status: 400 });
-    }
-
-    const admin = await Admin.findOne({ email: email.toLowerCase().trim() });
-    if (!admin) {
-      return NextResponse.json({ message: "Invalid email or password." }, { status: 401 });
-    }
-
     const isMatch = await bcrypt.compare(password, admin.password);
     if (!isMatch) {
       return NextResponse.json({ message: "Invalid email or password." }, { status: 401 });
     }
 
-    // Short-lived access token (15 minutes)
     const accessToken = jwt.sign(
       { id: admin._id, email: admin.email, name: admin.name },
-      JWT_SECRET,
+      jwtSecret,
       { expiresIn: "15m" }
     );
 
-    // Long-lived refresh token (random, stored in DB)
     const refreshToken = crypto.randomBytes(64).toString("hex");
     await RefreshToken.create({ adminId: admin._id, token: refreshToken });
 
@@ -46,7 +64,6 @@ export async function POST(req) {
 
     const isProd = process.env.NODE_ENV === "production";
 
-    // Access token cookie — 15 minutes
     response.cookies.set("token", accessToken, {
       httpOnly: true,
       secure: isProd,
@@ -55,7 +72,6 @@ export async function POST(req) {
       path: "/",
     });
 
-    // Refresh token cookie — 7 days
     response.cookies.set("refreshToken", refreshToken, {
       httpOnly: true,
       secure: isProd,
@@ -66,7 +82,7 @@ export async function POST(req) {
 
     return response;
   } catch (error) {
-    console.error("Login error:", error);
+    console.error("Login authentication operation failed:", error?.name || "unknown error");
     return NextResponse.json({ message: "Server error." }, { status: 500 });
   }
 }
