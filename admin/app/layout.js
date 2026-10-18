@@ -14,7 +14,10 @@ const geistMono = Geist_Mono({
 
 export const metadata = {
   title: "Abhivruddhi Admin Panel",
-  description: "Attendance system using QR code",
+  description: "Attendance system",
+  icons: {
+    icon: "/icon.png",
+  },
 };
 
 export default function RootLayout({ children }) {
