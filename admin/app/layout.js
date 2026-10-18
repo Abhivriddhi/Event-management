@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata = {
-  title: "QR Attendance",
+  title: "Abhivruddhi Admin Panel",
   description: "Attendance system using QR code",
 };
 
