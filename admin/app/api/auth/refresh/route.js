@@ -3,6 +3,7 @@ import dbConnect from "@/lib/dbConnect";
 import Admin from "@/lib/models/Admin";
 import RefreshToken from "@/lib/models/RefreshToken";
 import { getJwtSecret } from "@/lib/auth";
+import { isAdminRole } from "@/lib/rolePolicy";
 import jwt from "jsonwebtoken";
 
 export async function POST(req) {
@@ -28,9 +29,9 @@ export async function POST(req) {
     }
 
     admin = await Admin.findById(stored.adminId);
-    if (!admin) {
+    if (!admin || !admin.active || !isAdminRole(admin.role)) {
       await RefreshToken.deleteOne({ token: refreshToken });
-      return NextResponse.json({ message: "Admin not found." }, { status: 401 });
+      return NextResponse.json({ message: "Account is inactive or unavailable." }, { status: 401 });
     }
   } catch (error) {
     console.error("Refresh database operation failed:", error?.name || "unknown error");
@@ -40,13 +41,13 @@ export async function POST(req) {
   try {
     // Issue new access token
     const newAccessToken = jwt.sign(
-      { id: admin._id, email: admin.email, name: admin.name },
+      { id: admin._id, email: admin.email, name: admin.name, role: admin.role },
       jwtSecret,
       { expiresIn: "15m" }
     );
 
     const response = NextResponse.json({
-      admin: { name: admin.name, email: admin.email },
+      admin: { name: admin.name, email: admin.email, role: admin.role },
     });
 
     response.cookies.set("token", newAccessToken, {

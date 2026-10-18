@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "node --test",
+    "test:roles:integration": "node scripts/role-authorization-integration.mjs"
   },
   "dependencies": {
     "@radix-ui/react-select": "^2.1.5",

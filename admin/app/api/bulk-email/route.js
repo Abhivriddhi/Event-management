@@ -1,28 +1,14 @@
 import { NextResponse } from "next/server";
-import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
 import * as XLSX from "xlsx";
 import dbConnect from "@/lib/dbConnect";
 import BulkCampaign from "@/lib/models/BulkCampaign";
-import { getJwtSecret } from "@/lib/auth";
+import { requireAdmin } from "@/lib/auth";
 
 const VALID_EMAIL_DOMAIN = "@vit.edu";
 
 function normalizeText(value) {
   return String(value ?? "").trim();
-}
-
-function isAdminAuthenticated(req) {
-  try {
-    const token = req.cookies.get("token")?.value;
-    const jwtSecret = getJwtSecret();
-    if (!token || !jwtSecret) {
-      return null;
-    }
-    return jwt.verify(token, jwtSecret);
-  } catch {
-    return null;
-  }
 }
 
 function extractValue(row, keys) {
@@ -253,10 +239,8 @@ async function processCampaignQueue(campaignId) {
 }
 
 export async function POST(req) {
-  const admin = isAdminAuthenticated(req);
-  if (!admin) {
-    return NextResponse.json({ message: "Unauthorized. Please log in as an admin." }, { status: 401 });
-  }
+  const { response } = await requireAdmin(req);
+  if (response) return response;
 
   try {
     const contentType = req.headers.get("content-type") || "";
@@ -432,10 +416,8 @@ export async function POST(req) {
 }
 
 export async function GET(req) {
-  const admin = isAdminAuthenticated(req);
-  if (!admin) {
-    return NextResponse.json({ message: "Unauthorized. Please log in as an admin." }, { status: 401 });
-  }
+  const { response } = await requireAdmin(req);
+  if (response) return response;
 
   try {
     await dbConnect();

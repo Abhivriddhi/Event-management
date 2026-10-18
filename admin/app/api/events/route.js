@@ -14,7 +14,7 @@ function cleanEvent(event) {
 }
 
 export async function GET(req) {
-  const { response } = requireAdmin(req);
+  const { response } = await requireAdmin(req);
   if (response) return response;
   await dbConnect();
   const events = await Event.find({}).sort({ name: 1 });
@@ -22,7 +22,7 @@ export async function GET(req) {
 }
 
 export async function POST(req) {
-  const { response } = requireAdmin(req);
+  const { response } = await requireAdmin(req);
   if (response) return response;
   await dbConnect();
 
