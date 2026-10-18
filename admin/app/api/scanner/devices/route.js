@@ -11,7 +11,7 @@ function hashToken(value) {
 }
 
 export async function GET(req) {
-  const { response } = requireAdmin(req);
+  const { response } = await requireAdmin(req);
   if (response) return response;
   await dbConnect();
   const eventId = new URL(req.url).searchParams.get("eventId")?.toLowerCase();
@@ -23,7 +23,7 @@ export async function GET(req) {
 }
 
 export async function POST(req) {
-  const { response } = requireAdmin(req);
+  const { response } = await requireAdmin(req);
   if (response) return response;
   await dbConnect();
   try {
@@ -53,7 +53,7 @@ export async function POST(req) {
 }
 
 export async function PATCH(req) {
-  const { response } = requireAdmin(req);
+  const { response } = await requireAdmin(req);
   if (response) return response;
   await dbConnect();
   const { deviceId, active } = await req.json();

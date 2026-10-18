@@ -3,6 +3,7 @@ import dbConnect from "@/lib/dbConnect";
 import Admin from "@/lib/models/Admin";
 import RefreshToken from "@/lib/models/RefreshToken";
 import { getJwtSecret } from "@/lib/auth";
+import { isAdminRole } from "@/lib/rolePolicy";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
@@ -47,9 +48,12 @@ export async function POST(req) {
     if (!isMatch) {
       return NextResponse.json({ message: "Invalid email or password." }, { status: 401 });
     }
+    if (!admin.active || !isAdminRole(admin.role)) {
+      return NextResponse.json({ message: "This account is not active." }, { status: 403 });
+    }
 
     const accessToken = jwt.sign(
-      { id: admin._id, email: admin.email, name: admin.name },
+      { id: admin._id, email: admin.email, name: admin.name, role: admin.role },
       jwtSecret,
       { expiresIn: "15m" }
     );
@@ -59,7 +63,7 @@ export async function POST(req) {
 
     const response = NextResponse.json({
       message: "Login successful",
-      admin: { name: admin.name, email: admin.email },
+      admin: { name: admin.name, email: admin.email, role: admin.role },
     });
 
     const isProd = process.env.NODE_ENV === "production";

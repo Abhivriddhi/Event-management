@@ -29,7 +29,7 @@ export default function LoginPage() {
       const data = await res.json();
 
       if (res.ok) {
-        router.push("/guidelines");
+        router.push(data.admin?.role === "qr_admin" ? "/scanner" : "/events");
       } else {
         setError(data.message || "Invalid email or password.");
         setLoading(false);
@@ -88,6 +88,9 @@ export default function LoginPage() {
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? "Logging in..." : "Login"}
             </Button>
+            <p className="text-center text-sm text-muted-foreground">
+              Need an account? <a className="text-primary underline" href="/request-access">Request access</a>
+            </p>
           </form>
         </CardContent>
       </Card>

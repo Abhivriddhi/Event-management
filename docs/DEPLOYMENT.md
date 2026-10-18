@@ -1041,7 +1041,50 @@ If the current codebase introduces additional environment variables later, add t
 
 ---
 
-# 32. Production Testing
+# 32. Role-Based Administrator Access
+
+The admin portal supports three account roles:
+
+| Role | Access |
+|---|---|
+| `super_admin` | Existing school administration, account management, role assignment, access-request review, and scanner administration |
+| `admin` | Existing school administration and scanner administration; no account or role management |
+| `qr_admin` | `/scanner` only; school-administration APIs reject this role |
+
+Protected APIs check the current account role and active status in MongoDB on each request. Changing an account role or disabling it revokes its refresh tokens and prevents existing access tokens from authorizing protected APIs. Paired scanner devices continue to use their separate device tokens.
+
+## Existing Database Migration
+
+Back up the database before an operational migration. The migration does not create accounts or change passwords. It promotes the specified existing admin to `super_admin`, assigns unset/invalid roles on other existing admins to `admin`, sets unset active flags to active, and revokes refresh tokens for accounts whose access settings changed.
+
+If and only if there is exactly one existing admin:
+
+```powershell
+cd admin
+node scripts/migrate-admin-roles.mjs --sole-existing-admin
+```
+
+If there is more than one admin, specify the existing seeded admin's email (the script does not print it):
+
+```powershell
+node scripts/migrate-admin-roles.mjs <seeded-admin-email>
+```
+
+The migration aborts if the selected account does not exist or is inactive. Do not rerun the seed API for an existing account.
+
+## Account Requests and Management
+
+Applicants use `/request-access`; a submitted password is bcrypt-hashed while pending. Pending requests do not create accounts and cannot log in. A Super Admin reviews requests under **Account management**, chooses the role, and approves or rejects. Rejected requests can be submitted again; their prior password hash is discarded. A Super Admin can also create accounts directly, change roles, or disable accounts. At least one active Super Admin must remain.
+
+Use a unique, strong password for each account and communicate credentials through a trusted channel. `JWT_SECRET` must be at least 32 bytes. No new persistent environment variable is required for role-based access.
+
+### Role authorization integration test
+
+With the application running locally against a non-production database, set `ROLE_AUTH_TEST_BASE_URL` to its loopback URL and `ROLE_AUTH_TEST_CONFIRM_DATABASE` to the exact database name, then run `npm run test:roles:integration` from `admin`. The test refuses non-local URLs and refuses to write unless the connected database name exactly matches the confirmation value. It creates uniquely named temporary accounts/requests and removes them after the run. Do not point this test at production.
+
+---
+
+# 33. Production Testing
 
 After deployment, test in this order.
 

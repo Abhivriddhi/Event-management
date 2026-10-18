@@ -7,7 +7,7 @@ import { getSpreadsheetRows } from "@/lib/services/googleApi";
 import EventParticipant from "@/lib/models/EventParticipant";
 
 export async function GET(req, { params }) {
-  const { response } = requireAdmin(req);
+  const { response } = await requireAdmin(req);
   if (response) return response;
   await dbConnect();
   const { eventId } = await params;

@@ -21,7 +21,7 @@ export async function POST(req) {
       return NextResponse.json({ message: "Verification unavailable; refer to the help desk." }, { status: 500 });
     }
   }
-  const { response } = requireAdmin(req);
+  const { response } = await requireAdmin(req);
   if (response) return response;
   await dbConnect();
 

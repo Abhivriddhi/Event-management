@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx";
+import { Award, BarChart3, BookOpen, CalendarDays, FileJson, Mail, QrCode, Ticket, UserCog, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/lib/hooks/useAuth";
@@ -23,15 +24,15 @@ const EMPTY_EVENT = {
 };
 
 const NAV_ITEMS = [
-  ["Guidelines", "/guidelines"],
-  ["Scan Attendance", "/scanner"],
-  ["Events & Templates", "/events"],
-  ["Convert to JSON", "/convert-data"],
-  ["Add Participant", "/add-participant"],
-  ["Send Tickets", "/send-tickets"],
-  ["Send Email", "/send-email"],
-  ["Total Attendance", "/attendance"],
-  ["Send Certificates", "/certificates"],
+  { label: "Guidelines", href: "/guidelines", icon: BookOpen },
+  { label: "Scan Attendance", href: "/scanner", icon: QrCode },
+  { label: "Events & Templates", href: "/events", icon: CalendarDays },
+  { label: "Convert to JSON", href: "/convert-data", icon: FileJson },
+  { label: "Add Participant", href: "/add-participant", icon: UserPlus },
+  { label: "Send Tickets", href: "/send-tickets", icon: Ticket },
+  { label: "Send Email", href: "/send-email", icon: Mail },
+  { label: "Total Attendance", href: "/attendance", icon: BarChart3 },
+  { label: "Send Certificates", href: "/certificates", icon: Award },
 ];
 
 function cleanEvent(event = {}) {
@@ -53,7 +54,7 @@ function cleanEvent(event = {}) {
 
 export default function EventsPage() {
   const router = useRouter();
-  const { loading: authLoading, logout } = useAuth();
+  const { admin, loading: authLoading, logout } = useAuth();
   const [events, setEvents] = useState([]);
   const [eventForm, setEventForm] = useState(EMPTY_EVENT);
   const [selectedEventId, setSelectedEventId] = useState("");
@@ -82,6 +83,9 @@ export default function EventsPage() {
   const [trackingLimit, setTrackingLimit] = useState(20);
   const [trackingLoading, setTrackingLoading] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState(null);
+  const navItems = admin?.role === "super_admin"
+    ? [...NAV_ITEMS, { label: "Account management", href: "/admin/accounts", icon: UserCog }]
+    : NAV_ITEMS;
 
   const refreshEvents = useCallback(async () => {
     const response = await fetch("/api/events", { cache: "no-store" });
@@ -537,9 +541,10 @@ export default function EventsPage() {
       <aside className="hidden w-64 shrink-0 flex-col border-r border-border bg-card md:flex">
         <div className="border-b border-border px-6 py-5 font-bold text-lg">Abhivriddhi</div>
         <nav className="flex-1 space-y-1 px-3 py-4">
-          {NAV_ITEMS.map(([label, href]) => (
+          {navItems.map(({ label, href, icon: Icon }) => (
             <button key={href} onClick={() => router.push(href)}
-              className={`w-full rounded-md px-3 py-2 text-left text-sm hover:bg-accent ${href === "/events" ? "bg-accent font-semibold" : ""}`}>
+              className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-sm hover:bg-accent ${href === "/events" ? "bg-accent font-semibold" : ""}`}>
+              <Icon className="h-4 w-4 shrink-0" />
               {label}
             </button>
           ))}
@@ -563,9 +568,10 @@ export default function EventsPage() {
           </div>
         </header>
         <nav className="flex gap-2 overflow-x-auto pb-1 md:hidden">
-          {NAV_ITEMS.map(([label, href]) => (
+          {navItems.map(({ label, href, icon: Icon }) => (
             <button key={href} onClick={() => router.push(href)}
-              className={`shrink-0 rounded-md border border-border px-3 py-2 text-xs ${href === "/events" ? "bg-accent font-semibold" : "bg-card"}`}>
+              className={`flex shrink-0 items-center gap-2 rounded-md border border-border px-3 py-2 text-xs ${href === "/events" ? "bg-accent font-semibold" : "bg-card"}`}>
+              <Icon className="h-4 w-4 shrink-0" />
               {label}
             </button>
           ))}

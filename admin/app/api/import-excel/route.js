@@ -5,7 +5,7 @@ import * as XLSX from "xlsx";
 import { requireAdmin } from "@/lib/auth";
 
 export async function POST(req) {
-  const { response } = requireAdmin(req);
+  const { response } = await requireAdmin(req);
   if (response) return response;
   await dbConnect();
 

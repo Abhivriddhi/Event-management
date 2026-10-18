@@ -9,7 +9,7 @@ import Event from "@/lib/models/Event";
 import { requireAdmin } from "@/lib/auth";
 
 export async function GET(req) {
-  const { response } = requireAdmin(req);
+  const { response } = await requireAdmin(req);
   if (response) return response;
   await dbConnect();
 

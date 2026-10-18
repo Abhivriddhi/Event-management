@@ -4,6 +4,8 @@ const AdminSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   password: { type: String, required: true }, // bcrypt hashed
+  role: { type: String, enum: ["super_admin", "admin", "qr_admin"], required: true },
+  active: { type: Boolean, required: true },
   createdAt: { type: Date, default: Date.now },
 });
 

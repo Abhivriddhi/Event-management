@@ -59,6 +59,8 @@ export async function POST(req) {
       name: normalizedName,
       email: normalizedEmail,
       password: hashedPassword,
+      role: "super_admin",
+      active: true,
     });
 
     return NextResponse.json({

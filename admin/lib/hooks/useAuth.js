@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 export function useAuth() {
   const router = useRouter();
+  const pathname = usePathname();
   const [admin, setAdmin] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -17,6 +18,11 @@ export function useAuth() {
         if (res.ok) {
           const data = await res.json();
           setAdmin(data.admin);
+          if (data.admin.role === "qr_admin" && pathname !== "/scanner") {
+            router.replace("/scanner");
+          } else if (pathname === "/admin/accounts" && data.admin.role !== "super_admin") {
+            router.replace("/guidelines");
+          }
           setLoading(false);
           return;
         }
@@ -41,7 +47,7 @@ export function useAuth() {
     };
 
     verifyAuth();
-  }, [router]);
+  }, [pathname, router]);
 
   const logout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
