@@ -1,6 +1,7 @@
 import crypto from "crypto";
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
+const GOOGLE_REQUEST_TIMEOUT_MS = 10_000;
 let cachedAccessToken = null;
 let cachedTokenExpiresAt = 0;
 
@@ -55,6 +56,7 @@ async function getAccessToken() {
       assertion,
     }),
     cache: "no-store",
+    signal: AbortSignal.timeout(GOOGLE_REQUEST_TIMEOUT_MS),
   });
   const result = await response.json();
   if (!response.ok || !result.access_token) {
@@ -74,11 +76,13 @@ export async function googleRequest(url, options = {}) {
       ...(options.headers || {}),
     },
     cache: "no-store",
+    signal: AbortSignal.timeout(GOOGLE_REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     const details = await response.text();
     const error = new Error(`Google API ${response.status}: ${details.slice(0, 500)}`);
     error.status = response.status;
+    error.retryAfter = response.headers.get("retry-after") || "";
     throw error;
   }
   return response;

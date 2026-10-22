@@ -33,6 +33,7 @@ export async function generatePdfWithAppsScript({
       qrPlaceholder,
     }),
     cache: "no-store",
+    signal: AbortSignal.timeout(20_000),
   });
 
   let result;
@@ -40,16 +41,24 @@ export async function generatePdfWithAppsScript({
   try {
     result = await response.json();
   } catch {
-    throw new Error(
+    const error = new Error(
       `Apps Script returned an invalid response. HTTP ${response.status}.`
     );
+    error.status = response.status;
+    error.retryAfter = response.headers.get("retry-after") || "";
+    throw error;
   }
 
   if (!response.ok || !result.ok) {
-    throw new Error(
+    const error = new Error(
       result.error ||
         `Apps Script request failed with status ${response.status}.`
     );
+    error.status = response.status;
+    error.retryAfter = response.headers.get("retry-after") || "";
+    error.retryAfterMs = Number(result.retryAfterMs) || 0;
+    error.retryable = result.retryable === true;
+    throw error;
   }
 
   if (!result.pdfBase64) {

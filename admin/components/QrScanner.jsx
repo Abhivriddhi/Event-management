@@ -5,25 +5,29 @@ import { useEffect, useId, useRef, useState } from "react";
 
 let cameraLifecycle = Promise.resolve();
 
-const QrCodeScanner = ({ onScan, onCameraState }) => {
+const QrCodeScanner = ({ onScan, onCameraState, onScanNext }) => {
   const readerId = `reader-${useId().replace(/:/g, "")}`;
   const [cameraError, setCameraError] = useState("");
   const [cameraStatus, setCameraStatus] = useState("CAMERA STARTING");
   const [detectionError, setDetectionError] = useState("");
   const [restartCount, setRestartCount] = useState(0);
+  const [awaitingNextScan, setAwaitingNextScan] = useState(false);
   const onScanRef = useRef(onScan);
   const onCameraStateRef = useRef(onCameraState);
+  const onScanNextRef = useRef(onScanNext);
+  const resumeScannerRef = useRef(null);
   const cooldownRef = useRef(false);
-  const cooldownTimeoutRef = useRef(null);
-  const detectionStatusTimeoutRef = useRef(null);
 
   onScanRef.current = onScan;
   onCameraStateRef.current = onCameraState;
+  onScanNextRef.current = onScanNext;
 
   useEffect(() => {
     let cancelled = false;
     let scanner;
     let startPromise;
+    let resumeScanner;
+    let scannerPaused = false;
     const notifyCameraState = (state, error) => onCameraStateRef.current?.(state, error);
     const setStatus = (status) => {
       if (!cancelled) setCameraStatus(status);
@@ -42,7 +46,24 @@ const QrCodeScanner = ({ onScan, onCameraState }) => {
         setStatus("CAMERA STARTING");
         notifyCameraState("starting");
         scanner = new Html5Qrcode(readerId);
-        const config = { fps: 10, qrbox: { width: 250, height: 250 } };
+        const config = { fps: 10 };
+        resumeScanner = () => {
+          if (cancelled) return;
+          try {
+            if (scannerPaused) scanner.resume();
+            scannerPaused = false;
+            cooldownRef.current = false;
+            setAwaitingNextScan(false);
+            setStatus("CAMERA ACTIVE — LOOKING FOR QR");
+            setDetectionError("");
+            onScanNextRef.current?.();
+          } catch (error) {
+            console.error("Failed to resume QR scanning:", error);
+            setDetectionError(error.message || String(error));
+            setStatus("QR DETECTION ERROR");
+          }
+        };
+        resumeScannerRef.current = resumeScanner;
         startPromise = scanner.start(
           { facingMode: "environment" },
           config,
@@ -50,14 +71,12 @@ const QrCodeScanner = ({ onScan, onCameraState }) => {
             if (cancelled || cooldownRef.current) return;
             console.log("[QR DETECTED]", decodedText);
             cooldownRef.current = true;
-            setStatus("QR DETECTED");
+            setAwaitingNextScan(true);
+            setStatus("QR DETECTED — REVIEW RESULT, THEN SCAN NEXT");
             setDetectionError("");
-            clearTimeout(detectionStatusTimeoutRef.current);
-            detectionStatusTimeoutRef.current = null;
-            let paused = false;
             try {
               scanner.pause();
-              paused = true;
+              scannerPaused = true;
             } catch (error) {
               console.error("Failed to pause QR scanning:", error);
               setDetectionError(error.message || String(error));
@@ -76,19 +95,6 @@ const QrCodeScanner = ({ onScan, onCameraState }) => {
               setDetectionError(error.message || String(error));
               setStatus("QR DETECTION ERROR");
             }
-            cooldownTimeoutRef.current = setTimeout(() => {
-              cooldownRef.current = false;
-              cooldownTimeoutRef.current = null;
-              try {
-                if (paused) scanner.resume();
-                setStatus("CAMERA ACTIVE — LOOKING FOR QR");
-                setDetectionError("");
-              } catch (error) {
-                console.error("Failed to resume QR scanning:", error);
-                setDetectionError(error.message || String(error));
-                setStatus("QR DETECTION ERROR");
-              }
-            }, 1200);
           },
           () => {}
         );
@@ -120,33 +126,32 @@ const QrCodeScanner = ({ onScan, onCameraState }) => {
     startScanner();
 
     return () => {
-  cancelled = true;
-  clearTimeout(cooldownTimeoutRef.current);
-  clearTimeout(detectionStatusTimeoutRef.current);
-  cooldownRef.current = false;
+      cancelled = true;
+      cooldownRef.current = false;
+      if (resumeScannerRef.current === resumeScanner) resumeScannerRef.current = null;
 
-  const cleanup = (async () => {
-    if (startPromise) {
-      await startPromise.catch(() => {});
-    }
+      const cleanup = (async () => {
+        if (startPromise) {
+          await startPromise.catch(() => {});
+        }
 
-    try {
-      if (scanner) {
-        await scanner.stop();
-      }
-    } catch (error) {
-      console.error("Failed to stop scanner:", error);
-    }
+        try {
+          if (scanner) {
+            await scanner.stop();
+          }
+        } catch (error) {
+          console.error("Failed to stop scanner:", error);
+        }
 
-    try {
-      scanner?.clear();
-    } catch (error) {
-      console.error("Failed to clear scanner:", error);
-    }
-  })();
+        try {
+          scanner?.clear();
+        } catch (error) {
+          console.error("Failed to clear scanner:", error);
+        }
+      })();
 
-  cameraLifecycle = cleanup;
-};
+      cameraLifecycle = cleanup;
+    };
   }, [readerId, restartCount]);
 
   const restartCamera = () => {
@@ -173,6 +178,17 @@ const QrCodeScanner = ({ onScan, onCameraState }) => {
         </div>
       )}
       <div id={readerId} className="w-full overflow-hidden" />
+      {awaitingNextScan && (
+        <div className="p-3 text-center">
+          <button
+            type="button"
+            onClick={() => resumeScannerRef.current?.()}
+            className="rounded-lg bg-white px-5 py-3 font-semibold text-black"
+          >
+            Scan next
+          </button>
+        </div>
+      )}
     </div>
   );
 };

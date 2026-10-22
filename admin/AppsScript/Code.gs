@@ -166,9 +166,14 @@ function doPost(e) {
       }
     }
 
+    const errorMessage = error.message || String(error);
+    const dailyQuota = /too many times for one day|daily quota/i.test(errorMessage);
+    const retryable = dailyQuota || /(?:\b429\b|\b5\d\d\b|timed?\s*out|temporarily unavailable|rate limit|too many times|internal error)/i.test(errorMessage);
     return jsonResponse({
       ok: false,
-      error: error.message || String(error),
+      error: errorMessage,
+      retryable,
+      retryAfterMs: dailyQuota ? 86_400_000 : retryable ? 60_000 : 0,
     });
   }
 }

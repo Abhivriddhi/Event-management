@@ -14,8 +14,6 @@ export default function ScannerPanel() {
   const [pendingSync, setPendingSync] = useState(0);
   const [loading, setLoading] = useState(true);
   const scanLock = useRef(false);
-  const scanLockTimeout = useRef(null);
-  const statusTimeout = useRef(null);
   const deviceRef = useRef(null);
 
   const refreshPendingCount = useCallback(async () => {
@@ -239,13 +237,14 @@ export default function ScannerPanel() {
     }
   }, []);
 
+  const handleScanNext = useCallback(() => {
+    setStatus({ kind: "idle", title: "SCANNING", detail: "Camera active. Point it at a ticket QR code." });
+  }, []);
+
   const handleScan = useCallback(async (rawValue) => {
     const currentDevice = deviceRef.current;
     if (!currentDevice || scanLock.current) return;
     scanLock.current = true;
-    clearTimeout(scanLockTimeout.current);
-    clearTimeout(statusTimeout.current);
-    scanLockTimeout.current = setTimeout(() => { scanLock.current = false; }, 1200);
     setStatus({ kind: "idle", title: "SCANNING", detail: "QR detected. Checking ticket…" });
     try {
       if (!(await validateOnlineSession(currentDevice))) return;
@@ -275,9 +274,7 @@ export default function ScannerPanel() {
     } catch (error) {
       setStatus({ kind: "deny", title: "SCAN ERROR", detail: error.message });
     } finally {
-      statusTimeout.current = setTimeout(() => {
-        setStatus({ kind: "idle", title: "READY TO SCAN", detail: "Point the camera at the next ticket QR code." });
-      }, 1200);
+      scanLock.current = false;
     }
   }, [refreshPendingCount, validateOnlineSession, verifyCrossColor]);
 
@@ -389,7 +386,7 @@ export default function ScannerPanel() {
               </span>
               <span className="text-sm text-gray-300">{pendingSync} scans pending sync</span>
             </div>
-            <div className="rounded-2xl bg-black p-2"><QrScanner onScan={handleScan} onCameraState={handleCameraState} /></div>
+            <div className="rounded-2xl bg-black p-2"><QrScanner onScan={handleScan} onCameraState={handleCameraState} onScanNext={handleScanNext} /></div>
             <div className={`mt-4 min-h-28 rounded-2xl p-5 text-center ${status.kind === "allow" ? "bg-green-800" : status.kind === "deny" ? "bg-red-800" : status.kind === "warn" ? "bg-amber-700" : "bg-[#1e1e30]"}`}>
               <h2 className="text-xl font-bold">{status.title}</h2>
               <p className="mt-2 text-sm">{status.detail}</p>
