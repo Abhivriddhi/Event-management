@@ -1,4 +1,4 @@
-export const DEFAULT_BATCH_SIZE = 5;
+export const DEFAULT_BATCH_SIZE = 10;
 export const MAX_BATCH_SIZE = 15;
 export const MAX_AUTOMATIC_RETRIES = 4;
 export const JOB_LEASE_MS = 90_000;
@@ -53,21 +53,25 @@ export function splitIntoBatches(count, batchSize) {
 export async function processBatchItems({
   recipients,
   batchSize,
+  recipientIndices,
   processItem,
   now = Date.now,
   runtimeMs = MAX_BATCH_RUNTIME_MS,
   shouldContinue = () => true,
 }) {
   const size = effectiveBatchSize(batchSize);
+  const candidateIndices = recipientIndices ?? recipients.map((_, index) => index);
   const startedAt = now();
   let processedCount = 0;
   while (processedCount < size && now() - startedAt < runtimeMs && shouldContinue()) {
     const currentTime = new Date(now());
-    const index = recipients.findIndex((recipient) =>
-      recipient.status === "PENDING"
-      && (!recipient.nextAttemptAt || recipient.nextAttemptAt <= currentTime)
-    );
-    if (index < 0) break;
+    const selectedIndex = candidateIndices.findIndex((candidateIndex) => {
+      const recipient = recipients[candidateIndex];
+      return recipient?.status === "PENDING"
+        && (!recipient.nextAttemptAt || recipient.nextAttemptAt <= currentTime);
+    });
+    if (selectedIndex < 0) break;
+    const index = candidateIndices[selectedIndex];
     await processItem(index, recipients[index]);
     processedCount++;
   }

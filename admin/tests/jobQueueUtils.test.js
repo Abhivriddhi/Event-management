@@ -19,8 +19,8 @@ import {
   MAX_AUTOMATIC_RETRIES,
 } from "../lib/services/jobQueueUtils.js";
 
-test("batch sizes default to five and enforce limits from one through fifteen", () => {
-  assert.equal(parseBatchSize(), 5);
+test("batch sizes default to ten and enforce limits from one through fifteen", () => {
+  assert.equal(parseBatchSize(), 10);
   assert.equal(parseBatchSize(1), 1);
   assert.equal(parseBatchSize(15), 15);
   assert.equal(effectiveBatchSize(1), 1);
@@ -69,6 +69,62 @@ test("repeated manual requests process only one additional batch each", async ()
   assert.equal(await processOneRequest(), 5);
   assert.equal(recipients.filter((recipient) => recipient.status === "SENT").length, 10);
   assert.equal(recipients.filter((recipient) => recipient.status === "PENDING").length, 2);
+});
+
+test("a numbered batch processes only recipients in its selected range", async () => {
+  const recipients = Array.from({ length: 12 }, () => ({ status: "PENDING" }));
+  const processedIndexes = [];
+  const processed = await processBatchItems({
+    recipients,
+    batchSize: 5,
+    recipientIndices: [5, 6, 7, 8, 9],
+    processItem: async (index, recipient) => {
+      processedIndexes.push(index);
+      recipient.status = "SENT";
+    },
+  });
+  assert.equal(processed, 5);
+  assert.deepEqual(processedIndexes, [5, 6, 7, 8, 9]);
+  assert.equal(recipients.filter((recipient) => recipient.status === "SENT").length, 5);
+  assert.equal(recipients.filter((recipient) => recipient.status === "PENDING").length, 7);
+});
+
+test("a numbered final partial batch processes only its remaining recipients", async () => {
+  const recipients = Array.from({ length: 12 }, () => ({ status: "PENDING" }));
+  const processedIndexes = [];
+  const processed = await processBatchItems({
+    recipients,
+    batchSize: 5,
+    recipientIndices: [10, 11],
+    processItem: async (index, recipient) => {
+      processedIndexes.push(index);
+      recipient.status = "SENT";
+    },
+  });
+  assert.equal(processed, 2);
+  assert.deepEqual(processedIndexes, [10, 11]);
+  assert.equal(recipients.filter((recipient) => recipient.status === "PENDING").length, 10);
+});
+
+test("a numbered batch skips recipients already sent", async () => {
+  const recipients = [
+    { status: "SENT" },
+    { status: "PENDING" },
+    { status: "SENT" },
+    { status: "PENDING" },
+  ];
+  const processedIndexes = [];
+  const processed = await processBatchItems({
+    recipients,
+    batchSize: 4,
+    recipientIndices: [0, 1, 2, 3],
+    processItem: async (index, recipient) => {
+      processedIndexes.push(index);
+      recipient.status = "SENT";
+    },
+  });
+  assert.equal(processed, 2);
+  assert.deepEqual(processedIndexes, [1, 3]);
 });
 
 test("slow work stops starting recipients before the request runtime budget is exhausted", async () => {

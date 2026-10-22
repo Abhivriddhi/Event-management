@@ -504,7 +504,23 @@ async function recordDeliveryFailure(job, leaseId, index, error, deliveryStarted
   });
 }
 
-export async function runJobBatch(jobId) {
+export async function runJobBatch(jobId, batchNumber = null) {
+  if (batchNumber !== null) {
+    if (!Number.isInteger(batchNumber) || batchNumber < 1) {
+      const error = new Error("Batch number must be a positive integer.");
+      error.status = 400;
+      throw error;
+    }
+    const jobDetails = await OperationJob.findById(jobId).select("recipientCount batchSize");
+    if (!jobDetails) throw new Error("Job not found.");
+    const batchCount = Math.ceil(jobDetails.recipientCount / effectiveBatchSize(jobDetails.batchSize));
+    if (batchNumber > batchCount) {
+      const error = new Error("Batch number is outside this job's recipient range.");
+      error.status = 400;
+      throw error;
+    }
+  }
+
   const workerLeaseId = crypto.randomUUID();
   const leaseId = crypto.randomUUID();
   const now = new Date();
@@ -533,7 +549,7 @@ export async function runJobBatch(jobId) {
     throw error;
   }
   try {
-    return await runLeasedJobBatch(jobId, workerLeaseId, leaseId);
+    return await runLeasedJobBatch(jobId, workerLeaseId, leaseId, batchNumber);
   } catch (error) {
     await recoverInterruptedBatch(jobId, leaseId, error);
     throw error;
@@ -590,7 +606,7 @@ async function recoverInterruptedBatch(jobId, leaseId, error) {
   );
 }
 
-async function runLeasedJobBatch(jobId, workerLeaseId, leaseId) {
+async function runLeasedJobBatch(jobId, workerLeaseId, leaseId, batchNumber = null) {
   const now = new Date();
   const job = await claimLease(OperationJob, {
     filter: {
@@ -645,9 +661,18 @@ async function runLeasedJobBatch(jobId, workerLeaseId, leaseId) {
       if (!event) throw new Error("Event no longer exists.");
     }
 
+    const batchSize = effectiveBatchSize(job.batchSize);
+    const startIndex = batchNumber === null ? 0 : (batchNumber - 1) * batchSize;
+    const recipientIndices = batchNumber === null
+      ? undefined
+      : Array.from(
+        { length: Math.max(0, Math.min(batchSize, job.recipients.length - startIndex)) },
+        (_, offset) => startIndex + offset
+      );
     await processBatchItems({
       recipients: job.recipients,
-      batchSize: effectiveBatchSize(job.batchSize),
+      batchSize,
+      recipientIndices,
       processItem: (index) => processRecipient(job, leaseId, index, event),
       shouldContinue: () => !leaseLost,
     });
@@ -671,10 +696,13 @@ async function runLeasedJobBatch(jobId, workerLeaseId, leaseId) {
     .filter(Boolean)
     .sort((left, right) => left - right)[0] || null;
   const processedCount = counts.successfulCount + counts.failedCount + counts.unknownCount;
-  const currentBatch = Math.max(1, Math.min(
-    Math.ceil(latest.recipientCount / latest.batchSize),
-    Math.floor(processedCount / effectiveBatchSize(latest.batchSize)) + 1
-  ));
+  const currentBatchSize = effectiveBatchSize(latest.batchSize);
+  const nextRecipientIndex = latest.recipients.findIndex((recipient) =>
+    ["PENDING", "PROCESSING", "SENDING"].includes(recipient.status)
+  );
+  const currentBatch = nextRecipientIndex < 0
+    ? Math.max(1, Math.ceil(latest.recipientCount / currentBatchSize))
+    : Math.floor(nextRecipientIndex / currentBatchSize) + 1;
   const terminalStatus = getTerminalJobStatus(counts);
   const terminal = Boolean(terminalStatus);
   const status = getUnleasedJobStatus(counts, eligiblePending);

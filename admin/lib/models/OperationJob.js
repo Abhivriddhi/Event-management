@@ -54,7 +54,7 @@ const OperationJobSchema = new mongoose.Schema(
       qrSize: { type: Number, default: 150 },
     },
     idempotencyKey: { type: String, default: undefined },
-    batchSize: { type: Number, default: 5, min: 1, max: 10 },
+    batchSize: { type: Number, default: 10, min: 1, max: 15 },
     currentBatch: { type: Number, default: 1 },
     recipientCount: { type: Number, default: 0 },
     processedCount: { type: Number, default: 0 },

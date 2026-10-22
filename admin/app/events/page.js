@@ -23,29 +23,6 @@ const EMPTY_EVENT = {
   },
 };
 
-const processJobBatch = async (jobId) => {
-  if (processingJobRef.current) return;
-  processingJobRef.current = true;
-  setBusy(true);
-  try {
-    const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "process" }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.message || "Could not process the next batch.");
-    setActiveJob(data.job);
-    setJobs((current) => current.map((job) => job._id === data.job._id ? { ...job, ...data.job } : job));
-    setNotice(`Batch request finished. Total sent: ${data.job.successfulCount || 0}; pending: ${data.job.pendingCount || 0}.`);
-  } catch (error) {
-    setNotice(error.message);
-  } finally {
-    processingJobRef.current = false;
-    setBusy(false);
-  }
-};
-
 const NAV_ITEMS = [
   { label: "Guidelines", href: "/guidelines", icon: BookOpen },
   { label: "Scan Attendance", href: "/scanner", icon: QrCode },
@@ -75,6 +52,39 @@ function cleanEvent(event = {}) {
   };
 }
 
+function getJobBatchSummaries(job) {
+  const recipients = Array.isArray(job.recipients) ? job.recipients : [];
+  const batchSize = Number(job.batchSize) || 10;
+  const batchCount = Math.ceil(recipients.length / batchSize);
+
+  return Array.from({ length: batchCount }, (_, batchIndex) => {
+    const startIndex = batchIndex * batchSize;
+    const batchRecipients = recipients.slice(startIndex, startIndex + batchSize);
+    const sent = batchRecipients.filter((recipient) => recipient.status === "SENT").length;
+    const failed = batchRecipients.filter((recipient) => ["FAILED", "UNKNOWN"].includes(recipient.status)).length;
+    const sending = batchRecipients.filter((recipient) => ["PROCESSING", "SENDING"].includes(recipient.status)).length;
+    const pending = batchRecipients.filter((recipient) => recipient.status === "PENDING").length;
+    const nextAttemptAt = batchRecipients
+      .filter((recipient) => recipient.status === "PENDING" && recipient.nextAttemptAt)
+      .map((recipient) => new Date(recipient.nextAttemptAt))
+      .sort((left, right) => left - right)[0] || null;
+    const status = sending ? "sending" : pending ? "pending" : failed ? "failed" : "completed";
+
+    return {
+      number: batchIndex + 1,
+      start: startIndex + 1,
+      end: startIndex + batchRecipients.length,
+      count: batchRecipients.length,
+      sent,
+      failed,
+      sending,
+      pending,
+      nextAttemptAt,
+      status,
+    };
+  });
+}
+
 export default function EventsPage() {
   const router = useRouter();
   const { admin, loading: authLoading, logout } = useAuth();
@@ -87,7 +97,7 @@ export default function EventsPage() {
   const [sourcePreview, setSourcePreview] = useState(null);
   const [emailPreview, setEmailPreview] = useState(null);
   const [operationType, setOperationType] = useState("email");
-  const [batchSize, setBatchSize] = useState("5");
+  const [batchSize, setBatchSize] = useState("10");
   const createJobKeyRef = useRef(null);
   const processingJobRef = useRef(false);
   const [attachmentKind, setAttachmentKind] = useState("");
@@ -112,6 +122,33 @@ export default function EventsPage() {
   const navItems = admin?.role === "super_admin"
     ? [...NAV_ITEMS, { label: "Account management", href: "/admin/accounts", icon: UserCog }]
     : NAV_ITEMS;
+
+  const processJobBatch = async (jobId, batchNumber) => {
+    if (processingJobRef.current) return;
+    processingJobRef.current = true;
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "process", batchNumber }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || `Could not process batch ${batchNumber}.`);
+      const batch = getJobBatchSummaries(data.job).find((item) => item.number === batchNumber);
+      setActiveJob(data.job);
+      setJobs((current) => current.map((job) => job._id === data.job._id ? { ...job, ...data.job } : job));
+      setNotice(
+        `Batch ${batchNumber}: ${batch?.sent || 0} sent, ${batch?.failed || 0} failed, `
+        + `${batch?.sending || 0} sending, ${batch?.pending || 0} pending.`
+      );
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      processingJobRef.current = false;
+      setBusy(false);
+    }
+  };
 
   const refreshEvents = useCallback(async () => {
     const response = await fetch("/api/events", { cache: "no-store" });
@@ -897,7 +934,7 @@ export default function EventsPage() {
             <label className="space-y-1 text-sm">Recipients per batch
               <select value={batchSize} onChange={(e) => setBatchSize(e.target.value)}
                 className="h-10 rounded-md border border-input bg-background px-3">
-                {Array.from({ length: 5 }, (_, index) => index + 1).map((size) => <option key={size} value={size}>{size}</option>)}
+                {Array.from({ length: 15 }, (_, index) => index + 1).map((size) => <option key={size} value={size}>{size}</option>)}
               </select>
             </label>
             {operationType === "email" && (
@@ -917,7 +954,7 @@ export default function EventsPage() {
               </>
             )}
             <Button disabled={busy || !selectedEventId} onClick={createJob}>Queue operation</Button>
-            <p className="basis-full text-xs text-muted-foreground">Each manual request processes up to {batchSize} recipients. Progress is stored in the database; click Process Next Batch to continue after each request.</p>
+            <p className="basis-full text-xs text-muted-foreground">Choose a batch size from 1 to 15 (default 10). Each numbered batch button below sends only its displayed recipient range when clicked. Batches never start automatically.</p>
           </CardContent>
         </Card>
 
@@ -950,20 +987,7 @@ export default function EventsPage() {
                 <div className="font-semibold">{activeJob.type} · {activeJob.status}</div>
                 <div className="mt-1">Batch: {activeJob.currentBatch || 1} · Processed: {activeJob.processedCount || 0} / {activeJob.recipientCount} · Pending: {activeJob.pendingCount || 0} · Processing: {activeJob.processingCount || 0} · Successful: {activeJob.successfulCount || 0} · Failed: {activeJob.failedCount || 0} · Unknown: {activeJob.unknownCount || 0}</div>
                 <progress className="mt-2 h-2 w-full" value={activeJob.processedCount || 0} max={activeJob.recipientCount || 1} />
-                <Button
-                  className="mt-3"
-                  size="sm"
-                  onClick={() => processJobBatch(activeJob._id)}
-                  disabled={
-                    busy ||
-                    (activeJob.leaseUntil &&
-                      new Date(activeJob.leaseUntil).getTime() > Date.now()) ||
-                    (activeJob.nextAttemptAt &&
-                      new Date(activeJob.nextAttemptAt).getTime() > Date.now())
-                  }
-                >
-                  {busy ? "Processing batch..." : "Process Next Batch"}
-                </Button>
+                <p className="mt-2 text-xs text-muted-foreground">Choose a numbered batch below to process only that recipient range.</p>
               </div>
             )}
             {jobs.map((job) => (
@@ -973,14 +997,43 @@ export default function EventsPage() {
                   <div className="text-muted-foreground">Batch {job.currentBatch || 1} · Processed {job.processedCount} / {job.recipientCount} · Success {job.successfulCount} · Failed {job.failedCount} · Unknown {job.unknownCount || 0}</div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  {["PENDING", "RUNNING", "RETRY_WAIT"].includes(job.status) && <Button size="sm" variant="outline" onClick={() => processJobBatch(job._id)} disabled={busy ||
-                    (job.leaseUntil &&
-                      new Date(job.leaseUntil).getTime() > Date.now()) ||
-                    (job.nextAttemptAt &&
-                      new Date(job.nextAttemptAt).getTime() > Date.now())}>Process Next Batch</Button>}
                   {["PARTIAL", "FAILED"].includes(job.status) && job.recipients?.some((recipient) => recipient.status === "FAILED" && recipient.retryable) && <Button size="sm" variant="outline" onClick={() => retryJob(job._id)}>Retry eligible failures</Button>}
                   {job.pendingCleanupCount > 0 && <Button size="sm" variant="outline" onClick={() => cleanupJob(job._id)}>Clean {job.pendingCleanupCount} temp files</Button>}
                 </div>
+                {getJobBatchSummaries(job).length > 0 && (
+                  <div className="basis-full space-y-2 border-t border-border pt-3">
+                    <p className="text-xs font-medium text-muted-foreground">Manual recipient batches</p>
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      {getJobBatchSummaries(job).map((batch) => {
+                        const canProcess = ["PENDING", "RUNNING", "RETRY_WAIT"].includes(job.status)
+                          && batch.status === "pending"
+                          && !busy
+                          && !(batch.nextAttemptAt && batch.nextAttemptAt.getTime() > Date.now())
+                          && !(job.leaseUntil && new Date(job.leaseUntil).getTime() > Date.now())
+                          && !(job.nextAttemptAt && new Date(job.nextAttemptAt).getTime() > Date.now());
+                        return (
+                          <div key={`${job._id}-batch-${batch.number}`} className="space-y-1 rounded-md border border-border p-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="w-full justify-start"
+                              onClick={() => processJobBatch(job._id, batch.number)}
+                              disabled={!canProcess}
+                            >
+                              Batch {batch.number} · {batch.start}-{batch.end} ({batch.count})
+                            </Button>
+                            <p className="text-xs capitalize text-muted-foreground">
+                              {batch.status} · {batch.sent} completed · {batch.pending} pending · {batch.sending} sending · {batch.failed} failed
+                            </p>
+                            {batch.nextAttemptAt && batch.nextAttemptAt.getTime() > Date.now() && (
+                              <p className="text-xs text-muted-foreground">Retry available at {batch.nextAttemptAt.toLocaleTimeString()}.</p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 {job.recipients?.some((recipient) => recipient.status === "FAILED") && (
                   <ul className="basis-full space-y-1 text-xs text-destructive">
                     {job.recipients.filter((recipient) => recipient.status === "FAILED").slice(0, 10).map((recipient) => (

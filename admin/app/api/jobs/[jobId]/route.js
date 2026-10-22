@@ -33,6 +33,7 @@ function publicJob(job) {
       attempts: recipient.attempts,
       retryable: recipient.retryable,
       lastError: recipient.lastError,
+      nextAttemptAt: recipient.nextAttemptAt,
     })),
   };
 }
@@ -79,7 +80,7 @@ export async function POST(req, { params }) {
       return NextResponse.json({ message: "Unsupported job action." }, { status: 400 });
     }
 
-    const job = await runJobBatch(jobId);
+    const job = await runJobBatch(jobId, body.batchNumber ?? null);
     return NextResponse.json({ job: publicJob(job) });
   } catch (error) {
     console.error("Process job error:", error?.name || "unknown error");

@@ -216,12 +216,12 @@ export default function ScannerPanel() {
       });
       const result = await response.json();
       if (response.ok && result.valid) {
-        setStatus({ kind: "allow", title: "ENTRY ALLOWED", detail: "Cross-color ticket verified online and recorded." });
+        setStatus({ kind: "allow", title: "ENTRY ALLOWED", detail: `Ticket ${ticketId} verified online and recorded.` });
       } else {
         setStatus({
           kind: response.status === 401 || response.status >= 500 ? "warn" : "deny",
           title: response.status === 401 || response.status >= 500 ? "HELP DESK — VERIFICATION UNAVAILABLE" : "ENTRY NOT ALLOWED",
-          detail: result.message || "Ticket verification failed.",
+          detail: `Ticket ${ticketId}: ${result.message || "Ticket verification failed."}`,
         });
       }
     } catch {
@@ -260,7 +260,7 @@ export default function ScannerPanel() {
       }
       const valid = await scannerStore.get("valid", ticketId);
       if (!valid) {
-        setStatus({ kind: "deny", title: "INVALID TICKET", detail: "Ticket is not in this counter's downloaded list." });
+        setStatus({ kind: "deny", title: "INVALID TICKET", detail: `Ticket ${ticketId} is not in this counter's downloaded list.` });
         return;
       }
       const used = await scannerStore.get("used", ticketId);
@@ -270,7 +270,7 @@ export default function ScannerPanel() {
       }
       await scannerStore.put("used", { id: ticketId, at: new Date().toISOString(), synced: false });
       await refreshPendingCount();
-      setStatus({ kind: "allow", title: "ENTRY ALLOWED", detail: "Verified offline against this counter's ticket list." });
+      setStatus({ kind: "allow", title: "ENTRY ALLOWED", detail: `Ticket ${ticketId} verified offline against this counter's ticket list.` });
     } catch (error) {
       setStatus({ kind: "deny", title: "SCAN ERROR", detail: error.message });
     } finally {

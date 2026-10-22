@@ -5,6 +5,25 @@ import { useEffect, useId, useRef, useState } from "react";
 
 let cameraLifecycle = Promise.resolve();
 
+function getCameraErrorMessage(error) {
+  if (error?.name === "NotAllowedError" || error?.name === "PermissionDeniedError") {
+    return "Camera permission was denied. Allow camera access in your browser settings, then restart the camera.";
+  }
+  if (error?.name === "NotFoundError" || error?.name === "DevicesNotFoundError") {
+    return "No camera was found on this device.";
+  }
+  if (error?.name === "NotReadableError" || error?.name === "TrackStartError") {
+    return "The camera could not start. Close other apps using it, then restart the camera.";
+  }
+  if (error?.name === "OverconstrainedError" || error?.name === "ConstraintNotSatisfiedError") {
+    return "The requested camera is unavailable. Check the connected cameras and try again.";
+  }
+  if (error?.name === "SecurityError") {
+    return "Camera access requires a secure connection. Open this scanner over HTTPS and allow camera access.";
+  }
+  return error?.message || "Could not access the camera. Check camera permissions and try again.";
+}
+
 const QrCodeScanner = ({ onScan, onCameraState, onScanNext }) => {
   const readerId = `reader-${useId().replace(/:/g, "")}`;
   const [cameraError, setCameraError] = useState("");
@@ -46,7 +65,13 @@ const QrCodeScanner = ({ onScan, onCameraState, onScanNext }) => {
         setStatus("CAMERA STARTING");
         notifyCameraState("starting");
         scanner = new Html5Qrcode(readerId);
-        const config = { fps: 10 };
+        const config = {
+          fps: 10,
+          qrbox: (viewfinderWidth, viewfinderHeight) => {
+            const size = Math.floor(Math.min(viewfinderWidth, viewfinderHeight) * 0.85);
+            return { width: size, height: size };
+          },
+        };
         resumeScanner = () => {
           if (cancelled) return;
           try {
@@ -111,11 +136,13 @@ const QrCodeScanner = ({ onScan, onCameraState, onScanNext }) => {
           video.playsInline = true;
           video.muted = true;
         }
-        setStatus("CAMERA ACTIVE — LOOKING FOR QR");
-        notifyCameraState("ready");
+        if (!cooldownRef.current) {
+          setStatus("CAMERA ACTIVE — LOOKING FOR QR");
+          notifyCameraState("ready");
+        }
       } catch (error) {
         if (cancelled) return;
-        const message = error.message || "Could not access the camera.";
+        const message = getCameraErrorMessage(error);
         console.error("Failed to initialize scanner:", error);
         setCameraError(message);
         setStatus("CAMERA ERROR");
@@ -156,6 +183,9 @@ const QrCodeScanner = ({ onScan, onCameraState, onScanNext }) => {
 
   const restartCamera = () => {
     setCameraError("");
+    setDetectionError("");
+    setAwaitingNextScan(false);
+    cooldownRef.current = false;
     setCameraStatus("CAMERA STARTING");
     setRestartCount((count) => count + 1);
   };
@@ -185,7 +215,7 @@ const QrCodeScanner = ({ onScan, onCameraState, onScanNext }) => {
             onClick={() => resumeScannerRef.current?.()}
             className="rounded-lg bg-white px-5 py-3 font-semibold text-black"
           >
-            Scan next
+            Scan Next
           </button>
         </div>
       )}
