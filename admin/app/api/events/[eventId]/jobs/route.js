@@ -3,6 +3,7 @@ import dbConnect from "@/lib/dbConnect";
 import OperationJob from "@/lib/models/OperationJob";
 import { requireAdmin } from "@/lib/auth";
 import { createOperationJob, previewEventEmail, testEventEmail } from "@/lib/services/jobService";
+import { DEFAULT_BATCH_SIZE, parseBatchSize } from "@/lib/services/jobQueueUtils";
 
 export async function GET(req, { params }) {
   const { response } = await requireAdmin(req);
@@ -48,12 +49,19 @@ export async function POST(req, { params }) {
     if (encodedFile.length > 8 * 1024 * 1024) {
       return NextResponse.json({ message: "An optional attachment must be smaller than 6 MB." }, { status: 413 });
     }
+    const idempotencyKey = String(body.idempotencyKey || "").trim();
+    if (!idempotencyKey || idempotencyKey.length > 100) {
+      return NextResponse.json({ message: "A valid request id is required." }, { status: 400 });
+    }
+    const batchSize = parseBatchSize(body.batchSize ?? DEFAULT_BATCH_SIZE);
     const job = await createOperationJob({
       eventId,
       type: body.type,
       subject: body.subject,
       html: body.html,
       attachmentKind: body.attachmentKind,
+      batchSize,
+      idempotencyKey,
       otherAttachment: body.attachment
         ? {
             filename: String(body.attachment.filename || "attachment"),
@@ -69,10 +77,15 @@ export async function POST(req, { params }) {
         type: job.type,
         status: job.status,
         recipientCount: job.recipientCount,
+        batchSize: job.batchSize,
+        processedCount: job.processedCount,
+        successfulCount: job.successfulCount,
+        failedCount: job.failedCount,
+        pendingCount: job.pendingCount,
       },
     }, { status: 201 });
   } catch (error) {
-    console.error("Create event operation error:", error);
+    console.error("Create event operation error:", error?.name || "unknown error");
     return NextResponse.json({ message: error.message || "Unable to create operation." }, { status: 400 });
   }
 }

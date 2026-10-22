@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import * as XLSX from "xlsx";
 import { Award, BarChart3, BookOpen, CalendarDays, FileJson, Mail, QrCode, Ticket, UserCog, UserPlus } from "lucide-react";
@@ -64,6 +64,8 @@ export default function EventsPage() {
   const [sourcePreview, setSourcePreview] = useState(null);
   const [emailPreview, setEmailPreview] = useState(null);
   const [operationType, setOperationType] = useState("email");
+  const [batchSize, setBatchSize] = useState("5");
+  const createJobKeyRef = useRef(null);
   const [attachmentKind, setAttachmentKind] = useState("");
   const [otherAttachment, setOtherAttachment] = useState(null);
   const [testRecipient, setTestRecipient] = useState("");
@@ -109,7 +111,7 @@ export default function EventsPage() {
     if (!deviceResponse.ok) throw new Error(deviceData.message || "Unable to load scanner devices.");
     setJobs(jobData.jobs || []);
     setDevices(deviceData.devices || []);
-    setActiveJob((jobData.jobs || []).find((job) => ["PENDING", "RUNNING"].includes(job.status)) || null);
+    setActiveJob((jobData.jobs || []).find((job) => ["PENDING", "RUNNING", "RETRY_WAIT"].includes(job.status)) || null);
   }, []);
 
   const refreshTracking = useCallback(async (eventId = selectedEventId) => {
@@ -307,6 +309,8 @@ export default function EventsPage() {
 
   const createJob = async () => {
     if (!selectedEventId) return setNotice("Save and select an event before queueing an operation.");
+    createJobKeyRef.current ||= localStorage.getItem("eventJobRequestKey") || crypto.randomUUID();
+    localStorage.setItem("eventJobRequestKey", createJobKeyRef.current);
     setBusy(true);
     try {
       const savedEvent = await persistEvent();
@@ -335,10 +339,14 @@ export default function EventsPage() {
           attachment,
           subject: eventForm.emailTemplate.subject,
           html: eventForm.emailTemplate.html,
+          batchSize: Number(batchSize),
+          idempotencyKey: createJobKeyRef.current,
         }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || "Could not queue operation.");
+      createJobKeyRef.current = null;
+      localStorage.removeItem("eventJobRequestKey");
       setActiveJob(data.job);
       setNotice(`${data.job.type} operation queued for ${data.job.recipientCount} recipients.`);
       await refreshEventTools(savedEvent.eventId);
@@ -354,33 +362,29 @@ export default function EventsPage() {
   const activeJobStatus = activeJob?.status;
 
   useEffect(() => {
-    if (!activeJobId || !["PENDING", "RUNNING"].includes(activeJobStatus)) return;
+    if (!activeJobId || !["PENDING", "RUNNING", "RETRY_WAIT"].includes(activeJobStatus)) return;
     let stopped = false;
     let timer;
-    const processNext = async () => {
+    const refreshProgress = async () => {
       try {
-        const response = await fetch(`/api/jobs/${encodeURIComponent(activeJobId)}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "process" }),
-        });
+        const response = await fetch(`/api/jobs/${encodeURIComponent(activeJobId)}`, { cache: "no-store" });
         const data = await response.json();
-        if (!response.ok) throw new Error(data.message || "Job processor failed.");
+        if (!response.ok) throw new Error(data.message || "Job progress could not be loaded.");
         if (stopped) return;
         setActiveJob(data.job);
         setJobs((current) => current.map((job) => job._id === data.job._id ? { ...job, ...data.job } : job));
-        if (["PENDING", "RUNNING"].includes(data.job.status)) {
-          timer = setTimeout(processNext, 200);
+        if (["PENDING", "RUNNING", "RETRY_WAIT"].includes(data.job.status)) {
+          timer = setTimeout(refreshProgress, 3000);
         } else {
           await refreshEventTools(selectedEventId);
         }
       } catch (error) {
         if (stopped) return;
-        setNotice(`Job paused: ${error.message}. It can resume from this page.`);
-        timer = setTimeout(processNext, 3000);
+        setNotice(`Job progress unavailable: ${error.message}. Scheduled processing continues independently.`);
+        timer = setTimeout(refreshProgress, 5000);
       }
     };
-    timer = setTimeout(processNext, 0);
+    timer = setTimeout(refreshProgress, 0);
     return () => {
       stopped = true;
       clearTimeout(timer);
@@ -866,6 +870,12 @@ export default function EventsPage() {
                 <option value="certificate">Personalized certificate PDF + email</option>
               </select>
             </label>
+            <label className="space-y-1 text-sm">Recipients per batch
+              <select value={batchSize} onChange={(e) => setBatchSize(e.target.value)}
+                className="h-10 rounded-md border border-input bg-background px-3">
+                {Array.from({ length: 10 }, (_, index) => index + 1).map((size) => <option key={size} value={size}>{size}</option>)}
+              </select>
+            </label>
             {operationType === "email" && (
               <>
                 <label className="space-y-1 text-sm">PDF attachment
@@ -883,7 +893,7 @@ export default function EventsPage() {
               </>
             )}
             <Button disabled={busy || !selectedEventId} onClick={createJob}>Queue operation</Button>
-            <p className="basis-full text-xs text-muted-foreground">Each request processes one recipient and persists status, progress, errors, retries, and cleanup metadata. Refreshing this page resumes pending work.</p>
+            <p className="basis-full text-xs text-muted-foreground">Scheduled processing sends recipients in batches of up to {batchSize}. Progress is stored in the database and continues when this page is closed.</p>
           </CardContent>
         </Card>
 
@@ -911,10 +921,10 @@ export default function EventsPage() {
         <Card>
           <CardHeader><CardTitle>Persistent operations</CardTitle></CardHeader>
           <CardContent className="space-y-3">
-            {activeJob && ["PENDING", "RUNNING"].includes(activeJob.status) && (
+            {activeJob && ["PENDING", "RUNNING", "RETRY_WAIT"].includes(activeJob.status) && (
               <div className="rounded-md border border-primary p-3 text-sm">
                 <div className="font-semibold">{activeJob.type} · {activeJob.status}</div>
-                <div className="mt-1">Processed: {activeJob.processedCount || 0} / {activeJob.recipientCount} · Successful: {activeJob.successfulCount || 0} · Failed: {activeJob.failedCount || 0}</div>
+                <div className="mt-1">Batch: {activeJob.currentBatch || 1} · Processed: {activeJob.processedCount || 0} / {activeJob.recipientCount} · Pending: {activeJob.pendingCount || 0} · Processing: {activeJob.processingCount || 0} · Successful: {activeJob.successfulCount || 0} · Failed: {activeJob.failedCount || 0} · Unknown: {activeJob.unknownCount || 0}</div>
                 <progress className="mt-2 h-2 w-full" value={activeJob.processedCount || 0} max={activeJob.recipientCount || 1} />
               </div>
             )}
@@ -922,10 +932,10 @@ export default function EventsPage() {
               <div key={job._id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border p-3 text-sm">
                 <div>
                   <div className="font-medium capitalize">{job.type} · {job.status}</div>
-                  <div className="text-muted-foreground">Processed {job.processedCount} / {job.recipientCount} · Success {job.successfulCount} · Failed {job.failedCount}</div>
+                  <div className="text-muted-foreground">Batch {job.currentBatch || 1} · Processed {job.processedCount} / {job.recipientCount} · Success {job.successfulCount} · Failed {job.failedCount} · Unknown {job.unknownCount || 0}</div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  {["PARTIAL", "FAILED"].includes(job.status) && <Button size="sm" variant="outline" onClick={() => retryJob(job._id)}>Retry failures</Button>}
+                  {["PARTIAL", "FAILED"].includes(job.status) && job.recipients?.some((recipient) => recipient.status === "FAILED" && recipient.retryable) && <Button size="sm" variant="outline" onClick={() => retryJob(job._id)}>Retry eligible failures</Button>}
                   {job.pendingCleanupCount > 0 && <Button size="sm" variant="outline" onClick={() => cleanupJob(job._id)}>Clean {job.pendingCleanupCount} temp files</Button>}
                 </div>
                 {job.recipients?.some((recipient) => recipient.status === "FAILED") && (
@@ -934,6 +944,11 @@ export default function EventsPage() {
                       <li key={`${job._id}-${recipient.email}`}>{recipient.email}: {recipient.lastError}</li>
                     ))}
                   </ul>
+                )}
+                {job.recipients?.some((recipient) => recipient.status === "UNKNOWN") && (
+                  <p className="basis-full text-xs text-amber-700">
+                    Delivery outcome unknown for some recipients; verify with the email provider before resending.
+                  </p>
                 )}
               </div>
             ))}

@@ -2,8 +2,34 @@ import { NextResponse } from "next/server";
 import dbConnect from "@/lib/dbConnect";
 import OperationJob from "@/lib/models/OperationJob";
 import { requireAdmin } from "@/lib/auth";
-import { getJobSummary, retryFailedRecipients, runJobItem } from "@/lib/services/jobService";
+import { getJobSummary, retryFailedRecipients, runJobBatch } from "@/lib/services/jobService";
 import { deleteDriveFile } from "@/lib/services/googleApi";
+
+function publicJob(job) {
+  return {
+    _id: job._id,
+    type: job.type,
+    status: job.status,
+    batchSize: job.batchSize,
+    currentBatch: job.currentBatch,
+    recipientCount: job.recipientCount,
+    processedCount: job.processedCount,
+    pendingCount: job.pendingCount,
+    processingCount: job.processingCount,
+    successfulCount: job.successfulCount,
+    failedCount: job.failedCount,
+    unknownCount: job.unknownCount,
+    lastError: job.lastError,
+    retryableCount: (job.recipients || []).filter((recipient) => recipient.status === "FAILED" && recipient.retryable).length,
+    recipients: (job.recipients || []).map((recipient) => ({
+      email: recipient.email,
+      status: recipient.status,
+      attempts: recipient.attempts,
+      retryable: recipient.retryable,
+      lastError: recipient.lastError,
+    })),
+  };
+}
 
 export async function GET(req, { params }) {
   const { response } = await requireAdmin(req);
@@ -25,17 +51,7 @@ export async function POST(req, { params }) {
     const body = await req.json().catch(() => ({}));
     if (body.action === "retry") {
       const job = await retryFailedRecipients(jobId);
-      return NextResponse.json({
-        job: {
-          _id: job._id,
-          type: job.type,
-          status: job.status,
-          recipientCount: job.recipientCount,
-          processedCount: job.processedCount,
-          successfulCount: job.successfulCount,
-          failedCount: job.failedCount,
-        },
-      });
+      return NextResponse.json({ job: publicJob(job) });
     } else if (body.action === "cleanup") {
       const job = await OperationJob.findById(jobId);
       if (!job) return NextResponse.json({ message: "Job not found." }, { status: 404 });
@@ -57,20 +73,10 @@ export async function POST(req, { params }) {
       return NextResponse.json({ message: "Unsupported job action." }, { status: 400 });
     }
 
-    const job = await runJobItem(jobId);
-    return NextResponse.json({
-      job: {
-        _id: job._id,
-        type: job.type,
-        status: job.status,
-        recipientCount: job.recipientCount,
-        processedCount: job.processedCount,
-        successfulCount: job.successfulCount,
-        failedCount: job.failedCount,
-      },
-    });
+    const job = await runJobBatch(jobId);
+    return NextResponse.json({ job: publicJob(job) });
   } catch (error) {
-    console.error("Process job error:", error);
+    console.error("Process job error:", error?.name || "unknown error");
     return NextResponse.json({ message: error.message || "Unable to process job." }, { status: 500 });
   }
 }

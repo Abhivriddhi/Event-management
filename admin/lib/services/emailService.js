@@ -30,18 +30,6 @@ function getTransporter() {
   const port = Number(process.env.SMTP_PORT || 587);
   const secure = process.env.SMTP_SECURE === "true";
   const transportConfig = { user, password, host, port, secure };
-  const transport = host ? "explicit SMTP host" : "Gmail service";
-
-  console.log("EMAIL CONFIG:", {
-    effectiveSmtpUser: user || "(not set)",
-    smtpHost: host || "smtp.gmail.com (Gmail service)",
-    smtpPort: host ? port : "(service default)",
-    secure: host ? secure : "(service default)",
-    transport,
-    passwordSet: Boolean(password),
-    passwordLength: password?.length || 0,
-  });
-
   if (!email || !user || !password) {
     throw new Error("Configure EMAIL and EMAIL_PASSWORD on the server; SMTP_USER is optional.");
   }
@@ -90,7 +78,13 @@ async function reserveDailySlot(limit) {
       { $inc: { reserved: 1 } },
       { new: true }
     );
-    if (!retry) throw new Error(`Daily email limit of ${limit} has been reached.`);
+    if (!retry) {
+      const error = new Error(`Daily email limit of ${limit} has been reached.`);
+      const nextDay = Date.parse(`${dateKey}T00:00:00.000Z`) + 86_400_000;
+      error.status = 429;
+      error.retryAfterMs = Math.max(0, nextDay - Date.now());
+      throw error;
+    }
     return dateKey;
   }
 }
@@ -120,6 +114,7 @@ export async function sendPersonalizedEmail({
   attachments = [],
   dailyLimit,
   delayMs,
+  onDeliveryStart = async () => {},
 }) {
   const limit = Number(process.env.EMAIL_DAILY_LIMIT || dailyLimit || 1500);
   const delay = Number(process.env.EMAIL_DELAY_MS ?? delayMs ?? 1000);
@@ -128,7 +123,9 @@ export async function sendPersonalizedEmail({
     await acquireGlobalRateSlot(delay);
     const renderedSubject = renderTemplate(subject, context);
     const renderedHtml = renderHtmlTemplate(html, context);
-    await getTransporter().sendMail({
+    const transporter = getTransporter();
+    await onDeliveryStart();
+    await transporter.sendMail({
       from: `"${process.env.EMAIL_FROM_NAME || "Abhivriddhi Admin"}" <${process.env.SENDER_EMAIL || process.env.EMAIL}>`,
       to,
       subject: renderedSubject,
@@ -136,7 +133,13 @@ export async function sendPersonalizedEmail({
       attachments,
     });
   } catch (error) {
-    await EmailUsage.updateOne({ dateKey }, { $inc: { reserved: -1 } });
+    const networkOutcomeUnknown = !error.responseCode
+      && ["ECONNECTION", "ECONNRESET", "ETIMEDOUT", "ESOCKET", "UND_ERR_SOCKET"].includes(
+        String(error.code || error.cause?.code || "").toUpperCase()
+      );
+    if (!networkOutcomeUnknown) {
+      await EmailUsage.updateOne({ dateKey }, { $inc: { reserved: -1 } });
+    }
     throw error;
   }
 }

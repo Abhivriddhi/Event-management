@@ -60,6 +60,10 @@ export default function SendTicketsPage() {
   const [resizing, setResizing] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
+  const [batchSize, setBatchSize] = useState("5");
+  const [sendJob, setSendJob] = useState(null);
+  const [restoringJob, setRestoringJob] = useState(true);
+  const sendRequestKeyRef = useRef(null);
   const dragStart = useRef({ mouseX: 0, mouseY: 0, qrX: 0, qrY: 0 });
   const resizeStart = useRef({ mouseX: 0, mouseY: 0, size: 0 });
 
@@ -68,6 +72,50 @@ export default function SendTicketsPage() {
       router.push("/login");
     }
   }, [router]);
+
+  useEffect(() => {
+    const jobId = localStorage.getItem("ticketSendJobId");
+    if (!jobId) {
+      setRestoringJob(false);
+      return;
+    }
+    fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message || "Unable to restore ticket job progress.");
+        setSendJob(data.job);
+      })
+      .catch((error) => setSendResult({ type: "error", message: error.message }))
+      .finally(() => setRestoringJob(false));
+  }, []);
+
+  useEffect(() => {
+    if (!sendJob?._id || !["PENDING", "RUNNING", "RETRY_WAIT"].includes(sendJob.status)) return;
+    let stopped = false;
+    let timer;
+    const refreshProgress = async () => {
+      try {
+        const response = await fetch(`/api/jobs/${encodeURIComponent(sendJob._id)}`, { cache: "no-store" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message || "Unable to load ticket job progress.");
+        if (stopped) return;
+        setSendJob(data.job);
+        if (["PENDING", "RUNNING", "RETRY_WAIT"].includes(data.job.status)) {
+          timer = setTimeout(refreshProgress, 3000);
+        }
+      } catch (error) {
+        if (!stopped) {
+          setSendResult({ type: "error", message: `Progress unavailable: ${error.message}` });
+          timer = setTimeout(refreshProgress, 5000);
+        }
+      }
+    };
+    timer = setTimeout(refreshProgress, 0);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, [sendJob?._id, sendJob?.status]);
 
   const handleLogout = () => {
     localStorage.removeItem("isLoggedIn");
@@ -163,9 +211,13 @@ export default function SendTicketsPage() {
     setSending(true);
     setSendResult(null);
     try {
+      sendRequestKeyRef.current ||= localStorage.getItem("ticketSendRequestKey") || crypto.randomUUID();
+      localStorage.setItem("ticketSendRequestKey", sendRequestKeyRef.current);
       const formData = new FormData();
       formData.append("ticketType", selectedTicketType);
       formData.append("event", selectedEvent);
+      formData.append("batchSize", batchSize);
+      formData.append("idempotencyKey", sendRequestKeyRef.current);
       formData.append("qrX", qrX);
       formData.append("qrY", qrY);
       formData.append("qrSize", qrSize);
@@ -178,11 +230,37 @@ export default function SendTicketsPage() {
         body: formData,
       });
       const result = await res.json();
-      setSendResult({ type: res.ok ? "success" : "error", message: result.message });
-    } catch (err) {
-      setSendResult({ type: "error", message: "Failed to send tickets." });
+      if (!res.ok) throw new Error(result.message || "Unable to queue ticket sending.");
+      sendRequestKeyRef.current = null;
+      localStorage.removeItem("ticketSendRequestKey");
+      localStorage.setItem("ticketSendJobId", String(result.job._id));
+      setSendJob(result.job);
+      setSendResult({ type: "success", message: result.message });
+    } catch (error) {
+      setSendResult({ type: "error", message: error.message || "Failed to queue ticket sending." });
+    } finally {
+      setSending(false);
     }
-    setSending(false);
+  };
+
+  const retryFailedTicketRecipients = async () => {
+    if (!sendJob?._id) return;
+    setSending(true);
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(sendJob._id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "retry" }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || "Retry failed.");
+      setSendJob(result.job);
+      setSendResult({ type: "success", message: "Eligible failed recipients were requeued; confirmed deliveries will not be resent." });
+    } catch (error) {
+      setSendResult({ type: "error", message: error.message });
+    } finally {
+      setSending(false);
+    }
   };
 
   const totalSteps = steps.length;
@@ -519,7 +597,18 @@ QR_Y    = ${qrY}`}
                     </div>
                   </div>
 
-                  {sendResult && (
+                    <label className="flex items-center gap-3 text-sm">
+                      <span className="font-medium">Recipients per batch</span>
+                      <select value={batchSize} onChange={(e) => setBatchSize(e.target.value)}
+                        className="h-9 rounded-md border border-input bg-transparent px-3">
+                        {Array.from({ length: 10 }, (_, index) => index + 1).map((size) => (
+                          <option key={size} value={size}>{size}</option>
+                        ))}
+                      </select>
+                      <span className="text-muted-foreground">Maximum 10; default 5</span>
+                    </label>
+
+                    {sendResult && (
                     <div className={cn(
                       "px-4 py-3 rounded-lg border text-sm font-medium",
                       sendResult.type === "success"
@@ -530,9 +619,36 @@ QR_Y    = ${qrY}`}
                     </div>
                   )}
 
-                  <Button className="w-full" onClick={handleSend} disabled={sending || !ticketFile}>
+                  {sendJob && (
+                    <div className="space-y-2 rounded-lg border border-border p-4 text-sm" aria-live="polite">
+                      <div className="font-semibold">Ticket job · {sendJob.status}</div>
+                      <p>
+                        Batch {sendJob.currentBatch || 1} · Processed {sendJob.processedCount || 0} / {sendJob.recipientCount}
+                        {" · "}Pending {sendJob.pendingCount || 0}
+                        {" · "}Processing {sendJob.processingCount || 0}
+                        {" · "}Sent {sendJob.successfulCount || 0}
+                        {" · "}Failed {sendJob.failedCount || 0}
+                        {" · "}Unknown {sendJob.unknownCount || 0}
+                      </p>
+                      <progress className="h-2 w-full" value={sendJob.processedCount || 0} max={sendJob.recipientCount || 1} />
+                      {sendJob.unknownCount > 0 && (
+                        <p className="text-amber-700">
+                          Some delivery outcomes are unknown. Verify those messages with the provider before manually resending.
+                        </p>
+                      )}
+                      {["PARTIAL", "FAILED"].includes(sendJob.status)
+                        && sendJob.recipients?.some((recipient) => recipient.status === "FAILED" && recipient.retryable)
+                        && (
+                          <Button variant="outline" onClick={retryFailedTicketRecipients} disabled={sending}>
+                            Retry eligible failures
+                          </Button>
+                        )}
+                    </div>
+                  )}
+
+                  <Button className="w-full" onClick={handleSend} disabled={restoringJob || sending || !ticketFile || ["PENDING", "RUNNING", "RETRY_WAIT"].includes(sendJob?.status)}>
                     <Send className="h-4 w-4 mr-2" />
-                    {sending ? "Sending Tickets..." : "Send Tickets to Participants"}
+                    {sending ? "Queueing Ticket Job..." : "Send Tickets to Participants"}
                   </Button>
                 </CardContent>
               </>

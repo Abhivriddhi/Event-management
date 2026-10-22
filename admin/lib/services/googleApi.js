@@ -79,6 +79,7 @@ export async function googleRequest(url, options = {}) {
     const details = await response.text();
     const error = new Error(`Google API ${response.status}: ${details.slice(0, 500)}`);
     error.status = response.status;
+    error.retryAfter = response.headers.get("retry-after") || "";
     throw error;
   }
   return response;
