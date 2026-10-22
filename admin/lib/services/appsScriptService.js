@@ -33,6 +33,7 @@ export async function generatePdfWithAppsScript({
       qrPlaceholder,
     }),
     cache: "no-store",
+    signal: AbortSignal.timeout(20_000),
   });
 
   let result;

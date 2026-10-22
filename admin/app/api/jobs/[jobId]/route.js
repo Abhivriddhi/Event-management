@@ -4,6 +4,10 @@ import OperationJob from "@/lib/models/OperationJob";
 import { requireAdmin } from "@/lib/auth";
 import { getJobSummary, retryFailedRecipients, runJobBatch } from "@/lib/services/jobService";
 import { deleteDriveFile } from "@/lib/services/googleApi";
+import { getSafeErrorMessage } from "@/lib/services/jobQueueUtils";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 function publicJob(job) {
   return {
@@ -19,6 +23,8 @@ function publicJob(job) {
     successfulCount: job.successfulCount,
     failedCount: job.failedCount,
     unknownCount: job.unknownCount,
+    leaseUntil: job.leaseUntil,
+    nextAttemptAt: job.nextAttemptAt,
     lastError: job.lastError,
     retryableCount: (job.recipients || []).filter((recipient) => recipient.status === "FAILED" && recipient.retryable).length,
     recipients: (job.recipients || []).map((recipient) => ({
@@ -77,6 +83,9 @@ export async function POST(req, { params }) {
     return NextResponse.json({ job: publicJob(job) });
   } catch (error) {
     console.error("Process job error:", error?.name || "unknown error");
-    return NextResponse.json({ message: error.message || "Unable to process job." }, { status: 500 });
+    return NextResponse.json(
+      { message: getSafeErrorMessage(error) || "Unable to process job." },
+      { status: error.status || 500 }
+    );
   }
 }

@@ -1,15 +1,45 @@
 export const DEFAULT_BATCH_SIZE = 5;
-export const MAX_BATCH_SIZE = 10;
+export const MAX_BATCH_SIZE = 5;
 export const MAX_AUTOMATIC_RETRIES = 4;
 export const JOB_LEASE_MS = 90_000;
-export const MAX_BATCH_RUNTIME_MS = 240_000;
+export const MAX_BATCH_RUNTIME_MS = 5_000;
 
 export function parseBatchSize(value = DEFAULT_BATCH_SIZE) {
   const batchSize = Number(value);
   if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > MAX_BATCH_SIZE) {
-    throw new Error(`Batch size must be an integer between 1 and ${MAX_BATCH_SIZE}.`);
+    throw new Error(`Batch size must be an integer between 1 and ${MAX_BATCH_SIZE} until larger batches are verified safe.`);
   }
   return batchSize;
+}
+
+export function effectiveBatchSize(value = DEFAULT_BATCH_SIZE) {
+  const batchSize = Number(value);
+  return Number.isInteger(batchSize) && batchSize > 0
+    ? Math.min(batchSize, MAX_BATCH_SIZE)
+    : DEFAULT_BATCH_SIZE;
+}
+
+export function claimLease(model, {
+  filter,
+  leaseId,
+  now,
+  leaseMs,
+  idField = "leaseId",
+  untilField = "leaseUntil",
+}) {
+  return model.findOneAndUpdate(
+    {
+      ...filter,
+      $or: [{ [untilField]: null }, { [untilField]: { $lte: now } }],
+    },
+    {
+      $set: {
+        [idField]: leaseId,
+        [untilField]: new Date(now.getTime() + leaseMs),
+      },
+    },
+    { new: true }
+  );
 }
 
 export function splitIntoBatches(count, batchSize) {
@@ -28,7 +58,7 @@ export async function processBatchItems({
   runtimeMs = MAX_BATCH_RUNTIME_MS,
   shouldContinue = () => true,
 }) {
-  const size = parseBatchSize(batchSize);
+  const size = effectiveBatchSize(batchSize);
   const startedAt = now();
   let processedCount = 0;
   while (processedCount < size && now() - startedAt < runtimeMs && shouldContinue()) {
@@ -102,14 +132,16 @@ export function getTerminalJobStatus(counts) {
   return "COMPLETED";
 }
 
+export function getUnleasedJobStatus(counts, eligiblePending) {
+  return getTerminalJobStatus(counts) || (eligiblePending ? "PENDING" : "RETRY_WAIT");
+}
+
 export function classifyDeliveryError(error, deliveryStarted = false) {
   const responseCode = Number(error?.responseCode);
   const status = Number(error?.status || error?.statusCode);
   const code = String(error?.code || error?.cause?.code || "").toUpperCase();
 
   if (deliveryStarted) {
-    if (responseCode >= 400 && responseCode < 500) return { kind: "transient", retryable: true };
-    if (responseCode >= 500) return { kind: "permanent", retryable: false };
     return { kind: "unknown", retryable: false };
   }
 
@@ -132,6 +164,9 @@ export function classifyDeliveryError(error, deliveryStarted = false) {
     "UND_ERR_HEADERS_TIMEOUT",
     "UND_ERR_SOCKET",
   ].includes(code)) {
+    return { kind: "transient", retryable: true };
+  }
+  if (["AbortError", "TimeoutError"].includes(String(error?.name || ""))) {
     return { kind: "transient", retryable: true };
   }
   if (status >= 400) return { kind: "permanent", retryable: false };

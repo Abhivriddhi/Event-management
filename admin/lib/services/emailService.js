@@ -43,11 +43,19 @@ function getTransporter() {
         port,
         secure,
         auth: { user, pass: password },
+        dnsTimeout: 5_000,
+        connectionTimeout: 8_000,
+        greetingTimeout: 8_000,
+        socketTimeout: 15_000,
       });
     } else {
       cachedTransporter = nodemailer.createTransport({
         service: "gmail",
         auth: { user, pass: password },
+        dnsTimeout: 5_000,
+        connectionTimeout: 8_000,
+        greetingTimeout: 8_000,
+        socketTimeout: 15_000,
       });
     }
     cachedTransporterConfig = transportConfig;
@@ -91,6 +99,7 @@ async function reserveDailySlot(limit) {
 
 async function acquireGlobalRateSlot(delayMs) {
   if (delayMs <= 0) return;
+  const deadline = Date.now() + 5_000;
   await EmailRateLimit.updateOne({ _id: "smtp" }, { $setOnInsert: { nextAllowedAt: null } }, { upsert: true });
   while (true) {
     const now = new Date();
@@ -102,6 +111,13 @@ async function acquireGlobalRateSlot(delayMs) {
     if (lock) return;
     const current = await EmailRateLimit.findById("smtp").lean();
     const waitMs = Math.max(50, (current?.nextAllowedAt?.getTime() || Date.now()) - Date.now());
+    if (Date.now() >= deadline) {
+      const error = new Error("Email delivery is waiting for the configured SMTP rate limit.");
+      error.status = 429;
+      error.retryable = true;
+      error.retryAfterMs = Math.max(1_000, waitMs);
+      throw error;
+    }
     await new Promise((resolve) => setTimeout(resolve, Math.min(waitMs, 2000)));
   }
 }

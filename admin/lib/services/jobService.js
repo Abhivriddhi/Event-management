@@ -22,9 +22,12 @@ import {
 import {
   countJobRecipients,
   classifyDeliveryError,
+  claimLease,
   DEFAULT_BATCH_SIZE,
+  effectiveBatchSize,
   getRetryDelayMs,
   getSafeErrorMessage,
+  getUnleasedJobStatus,
   JOB_LEASE_MS,
   parseBatchSize,
   parseRetryAfter,
@@ -503,6 +506,7 @@ async function recordDeliveryFailure(job, leaseId, index, error, deliveryStarted
 
 export async function runJobBatch(jobId) {
   const workerLeaseId = crypto.randomUUID();
+  const leaseId = crypto.randomUUID();
   const now = new Date();
   try {
     await EmailRateLimit.updateOne(
@@ -513,21 +517,26 @@ export async function runJobBatch(jobId) {
   } catch (error) {
     if (error.code !== 11000) throw error;
   }
-  const workerLease = await EmailRateLimit.findOneAndUpdate(
-    {
-      _id: "job-worker",
-      $or: [{ workerLeaseUntil: null }, { workerLeaseUntil: { $lte: now } }],
-    },
-    { $set: { workerLeaseId, workerLeaseUntil: new Date(now.getTime() + JOB_LEASE_MS) } },
-    { new: true }
-  );
+  const workerLease = await claimLease(EmailRateLimit, {
+    filter: { _id: "job-worker" },
+    leaseId: workerLeaseId,
+    now,
+    leaseMs: JOB_LEASE_MS,
+    idField: "workerLeaseId",
+    untilField: "workerLeaseUntil",
+  });
   if (!workerLease) {
     const current = await OperationJob.findById(jobId);
     if (!current) throw new Error("Job not found.");
-    return current;
+    const error = new Error("Another job batch is currently processing. Refresh progress before trying again.");
+    error.status = 409;
+    throw error;
   }
   try {
-    return await runLeasedJobBatch(jobId, workerLeaseId);
+    return await runLeasedJobBatch(jobId, workerLeaseId, leaseId);
+  } catch (error) {
+    await recoverInterruptedBatch(jobId, leaseId, error);
+    throw error;
   } finally {
     await EmailRateLimit.updateOne(
       { _id: "job-worker", workerLeaseId },
@@ -536,32 +545,72 @@ export async function runJobBatch(jobId) {
   }
 }
 
-async function runLeasedJobBatch(jobId, workerLeaseId) {
-  const leaseId = crypto.randomUUID();
+async function recoverInterruptedBatch(jobId, leaseId, error) {
   const now = new Date();
-  const job = await OperationJob.findOneAndUpdate(
-    {
-      _id: jobId,
-      status: { $in: ["PENDING", "RUNNING", "RETRY_WAIT"] },
-      $and: [
-        { $or: [{ leaseUntil: null }, { leaseUntil: { $lte: now } }] },
-        { $or: [{ nextAttemptAt: null }, { nextAttemptAt: { $lte: now } }] },
-      ],
-    },
+  const retryAt = new Date(now.getTime() + 30_000);
+  const result = await OperationJob.updateOne(
+    { _id: jobId, status: "RUNNING", leaseId },
     {
       $set: {
-        leaseId,
-        leaseUntil: new Date(now.getTime() + JOB_LEASE_MS),
-        status: "RUNNING",
-        nextAttemptAt: null,
+        status: "RETRY_WAIT",
+        nextAttemptAt: retryAt,
+        lastError: getSafeErrorMessage(error),
+        "recipients.$[sending].status": "UNKNOWN",
+        "recipients.$[sending].retryable": false,
+        "recipients.$[sending].lastError": "Worker stopped after delivery began; verify provider delivery before resending.",
+        "recipients.$[processing].status": "PENDING",
+        leaseId: "",
+        leaseUntil: null,
       },
     },
-    { new: true }
+    {
+      arrayFilters: [
+        { "sending.status": "SENDING" },
+        { "processing.status": "PROCESSING" },
+      ],
+    }
   );
+  if (!result.matchedCount) return;
+
+  const job = await OperationJob.findById(jobId);
+  if (!job) return;
+  const counts = countJobRecipients(job.recipients);
+  const processedCount = counts.successfulCount + counts.failedCount + counts.unknownCount;
+  const terminalStatus = getTerminalJobStatus(counts);
+  await OperationJob.updateOne(
+    { _id: jobId, status: "RETRY_WAIT", leaseId: "" },
+    {
+      $set: {
+        ...counts,
+        processedCount,
+        status: terminalStatus || "RETRY_WAIT",
+        completedAt: terminalStatus ? now : null,
+      },
+    }
+  );
+}
+
+async function runLeasedJobBatch(jobId, workerLeaseId, leaseId) {
+  const now = new Date();
+  const job = await claimLease(OperationJob, {
+    filter: {
+      _id: jobId,
+      status: { $in: ["PENDING", "RUNNING", "RETRY_WAIT"] },
+      $and: [{ $or: [{ nextAttemptAt: null }, { nextAttemptAt: { $lte: now } }] }],
+    },
+    leaseId,
+    now,
+    leaseMs: JOB_LEASE_MS,
+  });
 
   if (!job) {
     const current = await OperationJob.findById(jobId);
     if (!current) throw new Error("Job not found.");
+    if (["PENDING", "RUNNING", "RETRY_WAIT"].includes(current.status)) {
+      const error = new Error("This job is already being processed or is waiting for its retry time.");
+      error.status = 409;
+      throw error;
+    }
     return current;
   }
 
@@ -598,7 +647,7 @@ async function runLeasedJobBatch(jobId, workerLeaseId) {
 
     await processBatchItems({
       recipients: job.recipients,
-      batchSize: job.batchSize,
+      batchSize: effectiveBatchSize(job.batchSize),
       processItem: (index) => processRecipient(job, leaseId, index, event),
       shouldContinue: () => !leaseLost,
     });
@@ -611,18 +660,7 @@ async function runLeasedJobBatch(jobId, workerLeaseId) {
   const latest = await OperationJob.findOne({ _id: job._id, leaseId });
   if (!latest) return OperationJob.findById(job._id);
   if (batchError) {
-    await OperationJob.updateOne(
-      { _id: latest._id, leaseId },
-      {
-        $set: {
-          status: "RETRY_WAIT",
-          nextAttemptAt: new Date(Date.now() + 30_000),
-          lastError: getSafeErrorMessage(batchError),
-          leaseId: "",
-          leaseUntil: null,
-        },
-      }
-    );
+    await recoverInterruptedBatch(latest._id, leaseId, batchError);
     return OperationJob.findById(latest._id);
   }
   const counts = countJobRecipients(latest.recipients);
@@ -635,11 +673,11 @@ async function runLeasedJobBatch(jobId, workerLeaseId) {
   const processedCount = counts.successfulCount + counts.failedCount + counts.unknownCount;
   const currentBatch = Math.max(1, Math.min(
     Math.ceil(latest.recipientCount / latest.batchSize),
-    Math.floor(processedCount / latest.batchSize) + 1
+    Math.floor(processedCount / effectiveBatchSize(latest.batchSize)) + 1
   ));
   const terminalStatus = getTerminalJobStatus(counts);
   const terminal = Boolean(terminalStatus);
-  const status = terminalStatus || (eligiblePending ? "RUNNING" : "RETRY_WAIT");
+  const status = getUnleasedJobStatus(counts, eligiblePending);
   await OperationJob.updateOne(
     { _id: latest._id, leaseId },
     {

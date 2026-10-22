@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   classifyDeliveryError,
+  claimLease,
   countJobRecipients,
+  effectiveBatchSize,
   getRetryDelayMs,
   getSafeErrorMessage,
   getTerminalJobStatus,
+  getUnleasedJobStatus,
+  MAX_BATCH_RUNTIME_MS,
   parseBatchSize,
   parseRetryAfter,
   processBatchItems,
@@ -15,12 +19,12 @@ import {
   MAX_AUTOMATIC_RETRIES,
 } from "../lib/services/jobQueueUtils.js";
 
-test("batch sizes default to five and enforce integer limits from one through ten", () => {
+test("batch sizes default to five and enforce limits from one through five", () => {
   assert.equal(parseBatchSize(), 5);
-  assert.equal(parseBatchSize("10"), 10);
   assert.equal(parseBatchSize(1), 1);
-  for (const invalid of [0, 11, 1.5, "abc", null]) {
-    assert.throws(() => parseBatchSize(invalid), /between 1 and 10/);
+  assert.equal(effectiveBatchSize(10), 5);
+  for (const invalid of [0, 6, 1.5, "abc", null]) {
+    assert.throws(() => parseBatchSize(invalid), /between 1 and 5/);
   }
 });
 
@@ -40,17 +44,46 @@ test("multiple batches continue and retain a final partial batch", () => {
   ]);
 });
 
-test("batch runner automatically continues later batches and preserves a final partial batch", async () => {
+test("a batch request processes no more than one batch", async () => {
   const recipients = Array.from({ length: 12 }, () => ({ status: "PENDING" }));
-  const batchSizes = [];
-  while (recipients.some((recipient) => recipient.status === "PENDING")) {
-    batchSizes.push(await processBatchItems({
-      recipients,
-      batchSize: 5,
-      processItem: async (_, recipient) => { recipient.status = "SENT"; },
-    }));
-  }
-  assert.deepEqual(batchSizes, [5, 5, 2]);
+  const processed = await processBatchItems({
+    recipients,
+    batchSize: 5,
+    processItem: async (_, recipient) => { recipient.status = "SENT"; },
+  });
+  assert.equal(processed, 5);
+  assert.equal(recipients.filter((recipient) => recipient.status === "SENT").length, 5);
+  assert.equal(recipients.filter((recipient) => recipient.status === "PENDING").length, 7);
+});
+
+test("repeated manual requests process only one additional batch each", async () => {
+  const recipients = Array.from({ length: 12 }, () => ({ status: "PENDING" }));
+  const processOneRequest = () => processBatchItems({
+    recipients,
+    batchSize: 5,
+    processItem: async (_, recipient) => { recipient.status = "SENT"; },
+  });
+  assert.equal(await processOneRequest(), 5);
+  assert.equal(await processOneRequest(), 5);
+  assert.equal(recipients.filter((recipient) => recipient.status === "SENT").length, 10);
+  assert.equal(recipients.filter((recipient) => recipient.status === "PENDING").length, 2);
+});
+
+test("slow work stops starting recipients before the request runtime budget is exhausted", async () => {
+  const recipients = Array.from({ length: 5 }, () => ({ status: "PENDING" }));
+  let elapsed = 0;
+  const processed = await processBatchItems({
+    recipients,
+    batchSize: 5,
+    runtimeMs: MAX_BATCH_RUNTIME_MS,
+    now: () => elapsed,
+    processItem: async (_, recipient) => {
+      recipient.status = "SENT";
+      elapsed += MAX_BATCH_RUNTIME_MS + 1;
+    },
+  });
+  assert.equal(processed, 1);
+  assert.equal(recipients.filter((recipient) => recipient.status === "PENDING").length, 4);
 });
 
 test("one recipient failure does not stop other recipients in the same batch", async () => {
@@ -69,8 +102,9 @@ test("one recipient failure does not stop other recipients in the same batch", a
 
 test("batch runner leaves successful recipients alone and skips retry-delayed recipients", async () => {
   const recipients = [
-    { status: "SENT" },
+    { status: "SENT", attempts: 1, sentAt: new Date(0) },
     { status: "PENDING", nextAttemptAt: new Date(Date.now() + 60_000) },
+    { status: "UNKNOWN", attempts: 1 },
     { status: "PENDING" },
   ];
   const processedIndexes = [];
@@ -83,7 +117,60 @@ test("batch runner leaves successful recipients alone and skips retry-delayed re
     },
   });
   assert.equal(processed, 1);
-  assert.deepEqual(processedIndexes, [2]);
+  assert.deepEqual(processedIndexes, [3]);
+  assert.equal(recipients[0].status, "SENT");
+  assert.equal(recipients[0].attempts, 1);
+  assert.equal(recipients[2].status, "UNKNOWN");
+  assert.equal(recipients[2].attempts, 1);
+});
+
+test("parallel requests cannot acquire the same active worker lease", async () => {
+  let activeLease = null;
+  const model = {
+    async findOneAndUpdate(_filter, update) {
+      if (activeLease && activeLease.workerLeaseUntil > new Date(1000)) return null;
+      activeLease = {
+        workerLeaseId: update.$set.workerLeaseId,
+        workerLeaseUntil: update.$set.workerLeaseUntil,
+      };
+      return activeLease;
+    },
+  };
+  const options = {
+    filter: { _id: "job-worker" },
+    now: new Date(1000),
+    leaseMs: 90_000,
+    idField: "workerLeaseId",
+    untilField: "workerLeaseUntil",
+  };
+  const claims = await Promise.all([
+    claimLease(model, { ...options, leaseId: "request-a" }),
+    claimLease(model, { ...options, leaseId: "request-b" }),
+  ]);
+  assert.equal(claims.filter(Boolean).length, 1);
+});
+
+test("an expired worker lease can be claimed again", async () => {
+  let activeLease = { workerLeaseId: "expired", workerLeaseUntil: new Date(500) };
+  const model = {
+    async findOneAndUpdate(_filter, update) {
+      if (activeLease && activeLease.workerLeaseUntil > new Date(1000)) return null;
+      activeLease = {
+        workerLeaseId: update.$set.workerLeaseId,
+        workerLeaseUntil: update.$set.workerLeaseUntil,
+      };
+      return activeLease;
+    },
+  };
+  const lease = await claimLease(model, {
+    filter: { _id: "job-worker" },
+    leaseId: "recovered",
+    now: new Date(1000),
+    leaseMs: 90_000,
+    idField: "workerLeaseId",
+    untilField: "workerLeaseUntil",
+  });
+  assert.equal(lease.workerLeaseId, "recovered");
 });
 
 test("empty recipient lists do not create phantom batches", () => {
@@ -115,19 +202,42 @@ test("terminal job states do not complete while work is pending or processing", 
   assert.equal(getTerminalJobStatus({ pendingCount: 0, processingCount: 0, successfulCount: 0, failedCount: 0, unknownCount: 1 }), "FAILED");
 });
 
+test("unleased jobs with eligible pending work return to PENDING, not RUNNING", () => {
+  assert.equal(
+    getUnleasedJobStatus({ pendingCount: 2, processingCount: 0 }, true),
+    "PENDING"
+  );
+  assert.equal(
+    getUnleasedJobStatus({ pendingCount: 1, processingCount: 0 }, false),
+    "RETRY_WAIT"
+  );
+  assert.equal(
+    getUnleasedJobStatus({ pendingCount: 0, processingCount: 0, successfulCount: 1, failedCount: 0, unknownCount: 0 }, false),
+    "COMPLETED"
+  );
+});
+
 test("pre-delivery 429, 5xx, and network failures are safe transient retries", () => {
   assert.equal(classifyDeliveryError({ status: 429 }).kind, "transient");
   assert.equal(classifyDeliveryError({ status: 503 }).kind, "transient");
   assert.equal(classifyDeliveryError({ cause: { code: "ECONNRESET" } }).kind, "transient");
+  assert.equal(classifyDeliveryError({ name: "TimeoutError" }).kind, "transient");
 });
 
 test("permanent pre-delivery client errors are not retried", () => {
   assert.deepEqual(classifyDeliveryError({ status: 400 }), { kind: "permanent", retryable: false });
 });
 
-test("SMTP 4xx rejections are transient and 5xx rejections are permanent", () => {
-  assert.deepEqual(classifyDeliveryError({ responseCode: 450 }, true), { kind: "transient", retryable: true });
-  assert.deepEqual(classifyDeliveryError({ responseCode: 550 }, true), { kind: "permanent", retryable: false });
+test("SMTP errors after delivery starts remain unknown to prevent duplicate emails", () => {
+  assert.deepEqual(
+    classifyDeliveryError({ responseCode: 450 }, true),
+    { kind: "unknown", retryable: false }
+  );
+
+  assert.deepEqual(
+    classifyDeliveryError({ responseCode: 550 }, true),
+    { kind: "unknown", retryable: false }
+  );
 });
 
 test("network failures after delivery starts remain unknown rather than being blindly retried", () => {

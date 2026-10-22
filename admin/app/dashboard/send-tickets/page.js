@@ -64,6 +64,7 @@ export default function SendTicketsPage() {
   const [sendJob, setSendJob] = useState(null);
   const [restoringJob, setRestoringJob] = useState(true);
   const sendRequestKeyRef = useRef(null);
+  const batchRequestRef = useRef(false);
   const dragStart = useRef({ mouseX: 0, mouseY: 0, qrX: 0, qrY: 0 });
   const resizeStart = useRef({ mouseX: 0, mouseY: 0, size: 0 });
 
@@ -239,6 +240,32 @@ export default function SendTicketsPage() {
     } catch (error) {
       setSendResult({ type: "error", message: error.message || "Failed to queue ticket sending." });
     } finally {
+      setSending(false);
+    }
+  };
+
+  const processNextTicketBatch = async () => {
+    if (!sendJob?._id || batchRequestRef.current) return;
+    batchRequestRef.current = true;
+    setSending(true);
+    setSendResult(null);
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(sendJob._id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "process" }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || "Unable to process the next ticket batch.");
+      setSendJob(result.job);
+      setSendResult({
+        type: "success",
+        message: `Batch request finished. ${result.job.successfulCount || 0} sent; ${result.job.pendingCount || 0} pending.`,
+      });
+    } catch (error) {
+      setSendResult({ type: "error", message: error.message || "Unable to process the next ticket batch." });
+    } finally {
+      batchRequestRef.current = false;
       setSending(false);
     }
   };
@@ -601,11 +628,11 @@ QR_Y    = ${qrY}`}
                       <span className="font-medium">Recipients per batch</span>
                       <select value={batchSize} onChange={(e) => setBatchSize(e.target.value)}
                         className="h-9 rounded-md border border-input bg-transparent px-3">
-                        {Array.from({ length: 10 }, (_, index) => index + 1).map((size) => (
+                        {Array.from({ length: 5 }, (_, index) => index + 1).map((size) => (
                           <option key={size} value={size}>{size}</option>
                         ))}
                       </select>
-                      <span className="text-muted-foreground">Maximum 10; default 5</span>
+                      <span className="text-muted-foreground">Maximum 5 until larger batches are verified; default 5</span>
                     </label>
 
                     {sendResult && (
@@ -635,6 +662,17 @@ QR_Y    = ${qrY}`}
                         <p className="text-amber-700">
                           Some delivery outcomes are unknown. Verify those messages with the provider before manually resending.
                         </p>
+                      )}
+                      {["PENDING", "RUNNING", "RETRY_WAIT"].includes(sendJob.status) && (
+                        <Button
+                          variant="outline"
+                          onClick={processNextTicketBatch}
+                          disabled={restoringJob || sending
+                            || (sendJob.leaseUntil && new Date(sendJob.leaseUntil).getTime() > Date.now())
+                            || (sendJob.nextAttemptAt && new Date(sendJob.nextAttemptAt).getTime() > Date.now())}
+                        >
+                          {sending ? "Processing batch..." : sendJob.nextAttemptAt && new Date(sendJob.nextAttemptAt).getTime() > Date.now() ? "Retry waiting..." : "Process Next Batch"}
+                        </Button>
                       )}
                       {["PARTIAL", "FAILED"].includes(sendJob.status)
                         && sendJob.recipients?.some((recipient) => recipient.status === "FAILED" && recipient.retryable)
