@@ -19,12 +19,14 @@ import {
   MAX_AUTOMATIC_RETRIES,
 } from "../lib/services/jobQueueUtils.js";
 
-test("batch sizes default to five and enforce limits from one through five", () => {
+test("batch sizes default to five and enforce limits from one through fifteen", () => {
   assert.equal(parseBatchSize(), 5);
   assert.equal(parseBatchSize(1), 1);
-  assert.equal(effectiveBatchSize(10), 5);
-  for (const invalid of [0, 6, 1.5, "abc", null]) {
-    assert.throws(() => parseBatchSize(invalid), /between 1 and 5/);
+  assert.equal(parseBatchSize(15), 15);
+  assert.equal(effectiveBatchSize(1), 1);
+  assert.equal(effectiveBatchSize(15), 15);
+  for (const invalid of [0, 16, 1.5, "abc", null]) {
+    assert.throws(() => parseBatchSize(invalid), /between 1 and 15/);
   }
 });
 

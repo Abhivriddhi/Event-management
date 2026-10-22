@@ -1,5 +1,5 @@
 export const DEFAULT_BATCH_SIZE = 5;
-export const MAX_BATCH_SIZE = 5;
+export const MAX_BATCH_SIZE = 15;
 export const MAX_AUTOMATIC_RETRIES = 4;
 export const JOB_LEASE_MS = 90_000;
 export const MAX_BATCH_RUNTIME_MS = 5_000;
