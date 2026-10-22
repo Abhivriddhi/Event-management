@@ -60,10 +60,8 @@ export default function SendTicketsPage() {
   const [resizing, setResizing] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
-  const [batchSize, setBatchSize] = useState("5");
-  const [sendJob, setSendJob] = useState(null);
-  const [restoringJob, setRestoringJob] = useState(true);
-  const sendRequestKeyRef = useRef(null);
+  const [sendBatchState, setSendBatchState] = useState(null);
+  const [restoringBatch, setRestoringBatch] = useState(true);
   const batchRequestRef = useRef(false);
   const dragStart = useRef({ mouseX: 0, mouseY: 0, qrX: 0, qrY: 0 });
   const resizeStart = useRef({ mouseX: 0, mouseY: 0, size: 0 });
@@ -75,48 +73,45 @@ export default function SendTicketsPage() {
   }, [router]);
 
   useEffect(() => {
-    const jobId = localStorage.getItem("ticketSendJobId");
-    if (!jobId) {
-      setRestoringJob(false);
-      return;
+    try {
+      const savedState = sessionStorage.getItem("ticketSendBatchProgress");
+      if (savedState) {
+        const progress = JSON.parse(savedState);
+        if (!progress || !progress.settings || !Number.isInteger(progress.nextBatchIndex)
+          || !progress.recipients || typeof progress.recipients !== "object") {
+          throw new Error("Saved ticket batch progress is invalid.");
+        }
+        setSendBatchState(progress);
+        setSelectedTicketType(progress.settings.ticketType);
+        setSelectedEvent(progress.settings.event);
+        setQrX(progress.settings.qrX);
+        setQrY(progress.settings.qrY);
+        setQrSize(progress.settings.qrSize);
+        setEmailSubject(progress.settings.emailSubject);
+        setEmailBody(progress.settings.emailBody);
+      }
+    } catch (error) {
+      setSendResult({ type: "error", message: `Unable to restore ticket batch progress: ${error.message}` });
+      sessionStorage.removeItem("ticketSendBatchProgress");
+    } finally {
+      setRestoringBatch(false);
     }
-    fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" })
-      .then(async (response) => {
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.message || "Unable to restore ticket job progress.");
-        setSendJob(data.job);
-      })
-      .catch((error) => setSendResult({ type: "error", message: error.message }))
-      .finally(() => setRestoringJob(false));
   }, []);
 
   useEffect(() => {
-    if (!sendJob?._id || !["PENDING", "RUNNING", "RETRY_WAIT"].includes(sendJob.status)) return;
-    let stopped = false;
-    let timer;
-    const refreshProgress = async () => {
-      try {
-        const response = await fetch(`/api/jobs/${encodeURIComponent(sendJob._id)}`, { cache: "no-store" });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.message || "Unable to load ticket job progress.");
-        if (stopped) return;
-        setSendJob(data.job);
-        if (["PENDING", "RUNNING", "RETRY_WAIT"].includes(data.job.status)) {
-          timer = setTimeout(refreshProgress, 3000);
-        }
-      } catch (error) {
-        if (!stopped) {
-          setSendResult({ type: "error", message: `Progress unavailable: ${error.message}` });
-          timer = setTimeout(refreshProgress, 5000);
-        }
-      }
-    };
-    timer = setTimeout(refreshProgress, 0);
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
-  }, [sendJob?._id, sendJob?.status]);
+    if (restoringBatch) return;
+    if (!sendBatchState) {
+      sessionStorage.removeItem("ticketSendBatchProgress");
+      return;
+    }
+    const settings = { ...sendBatchState.settings };
+    delete settings.ticketFile;
+    try {
+      sessionStorage.setItem("ticketSendBatchProgress", JSON.stringify({ ...sendBatchState, settings }));
+    } catch (error) {
+      setSendResult({ type: "error", message: `Unable to save ticket batch progress: ${error.message}` });
+    }
+  }, [sendBatchState, restoringBatch]);
 
   const handleLogout = () => {
     localStorage.removeItem("isLoggedIn");
@@ -149,6 +144,7 @@ export default function SendTicketsPage() {
 
   // Drag handlers
   const onMouseDownDrag = (e) => {
+    if (sendBatchState) return;
     e.preventDefault();
     setDragging(true);
     dragStart.current = { mouseX: e.clientX, mouseY: e.clientY, qrX, qrY };
@@ -169,6 +165,7 @@ export default function SendTicketsPage() {
 
   // Resize handlers (bottom-right corner)
   const onMouseDownResize = (e) => {
+    if (sendBatchState) return;
     e.preventDefault();
     e.stopPropagation();
     setResizing(true);
@@ -208,88 +205,159 @@ export default function SendTicketsPage() {
     return true;
   };
 
-  const handleSend = async () => {
-    setSending(true);
-    setSendResult(null);
-    try {
-      sendRequestKeyRef.current ||= localStorage.getItem("ticketSendRequestKey") || crypto.randomUUID();
-      localStorage.setItem("ticketSendRequestKey", sendRequestKeyRef.current);
-      const formData = new FormData();
-      formData.append("ticketType", selectedTicketType);
-      formData.append("event", selectedEvent);
-      formData.append("batchSize", batchSize);
-      formData.append("idempotencyKey", sendRequestKeyRef.current);
-      formData.append("qrX", qrX);
-      formData.append("qrY", qrY);
-      formData.append("qrSize", qrSize);
-      formData.append("emailSubject", emailSubject);
-      formData.append("emailBody", emailBody);
-      formData.append("ticketFile", ticketFile);
-
-      const res = await fetch("/api/send-tickets", {
-        method: "POST",
-        body: formData,
-      });
-      const result = await res.json();
-      if (!res.ok) throw new Error(result.message || "Unable to queue ticket sending.");
-      sendRequestKeyRef.current = null;
-      localStorage.removeItem("ticketSendRequestKey");
-      localStorage.setItem("ticketSendJobId", String(result.job._id));
-      setSendJob(result.job);
-      setSendResult({ type: "success", message: result.message });
-    } catch (error) {
-      setSendResult({ type: "error", message: error.message || "Failed to queue ticket sending." });
-    } finally {
-      setSending(false);
+  const sendTicketBatch = async (batchIndex, retryEmails = null) => {
+    if (batchRequestRef.current || restoringBatch || sendBatchState?.deliveryUnconfirmed) return;
+    const settings = sendBatchState?.settings
+      ? { ...sendBatchState.settings, ticketFile: sendBatchState.settings.ticketFile || ticketFile }
+      : {
+      ticketType: selectedTicketType,
+      event: selectedEvent,
+      qrX,
+      qrY,
+      qrSize,
+      emailSubject,
+      emailBody,
+      ticketFile,
+    };
+    if (!settings.ticketFile) {
+      setSendResult({ type: "error", message: "Ticket file is required." });
+      return;
     }
-  };
 
-  const processNextTicketBatch = async () => {
-    if (!sendJob?._id || batchRequestRef.current) return;
     batchRequestRef.current = true;
     setSending(true);
     setSendResult(null);
+    let outcomeKnown = false;
+    let requestStarted = false;
     try {
-      const response = await fetch(`/api/jobs/${encodeURIComponent(sendJob._id)}`, {
+      const pendingState = {
+        ...(sendBatchState || {}),
+        settings,
+        totalRecipients: sendBatchState?.totalRecipients || 0,
+        nextBatchIndex: sendBatchState?.nextBatchIndex ?? batchIndex,
+        hasMore: sendBatchState?.hasMore ?? true,
+        nextBatchSize: sendBatchState?.nextBatchSize || 0,
+        recipients: sendBatchState?.recipients || {},
+        deliveryUnconfirmed: true,
+      };
+      const pendingSettings = { ...settings };
+      delete pendingSettings.ticketFile;
+      sessionStorage.setItem("ticketSendBatchProgress", JSON.stringify({
+        ...pendingState,
+        settings: pendingSettings,
+      }));
+      setSendBatchState(pendingState);
+
+      const formData = new FormData();
+      formData.append("ticketType", settings.ticketType);
+      formData.append("event", settings.event);
+      formData.append("batchIndex", String(batchIndex));
+      formData.append("qrX", String(settings.qrX));
+      formData.append("qrY", String(settings.qrY));
+      formData.append("qrSize", String(settings.qrSize));
+      formData.append("emailSubject", settings.emailSubject);
+      formData.append("emailBody", settings.emailBody);
+      formData.append("ticketFile", settings.ticketFile);
+      if (retryEmails) {
+        formData.append("retryEmails", JSON.stringify(retryEmails));
+      } else {
+        formData.append("attemptedEmails", JSON.stringify(Object.keys(sendBatchState?.recipients || {})));
+      }
+
+      const response = await fetch("/api/send-tickets", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "process" }),
+        body: formData,
       });
+      requestStarted = true;
       const result = await response.json();
-      if (!response.ok) throw new Error(result.message || "Unable to process the next ticket batch.");
-      setSendJob(result.job);
+      if (!response.ok) {
+        outcomeKnown = response.status < 500;
+        throw new Error(result.message || "Unable to send this ticket batch.");
+      }
+      if (!Array.isArray(result.recipients) || !Number.isInteger(result.totalRecipients)) {
+        throw new Error("The server returned incomplete batch results.");
+      }
+      outcomeKnown = true;
+
+      setSendBatchState((current) => {
+        const recipients = { ...(current?.recipients || {}) };
+        for (const recipient of result.recipients) {
+          const key = recipient.email.toLowerCase();
+          const previous = recipients[key];
+          recipients[key] = {
+            ...recipient,
+            retryCount: (previous?.retryCount || 0) + (retryEmails ? 1 : 0),
+          };
+        }
+        return {
+          settings,
+          totalRecipients: result.totalRecipients,
+          nextBatchIndex: retryEmails ? current?.nextBatchIndex ?? batchIndex : result.nextBatchIndex,
+          hasMore: retryEmails ? current?.hasMore || false : result.hasMore,
+          nextBatchSize: retryEmails ? current?.nextBatchSize || 0 : result.nextBatchSize,
+          recipients,
+          deliveryUnconfirmed: false,
+        };
+      });
       setSendResult({
-        type: "success",
-        message: `Batch request finished. ${result.job.successfulCount || 0} sent; ${result.job.pendingCount || 0} pending.`,
+        type: result.failed ? "error" : "success",
+        message: retryEmails
+          ? `Retry complete. Sent: ${result.sent}, Failed: ${result.failed}.`
+          : `Batch ${batchIndex + 1} complete. Sent: ${result.sent}, Failed: ${result.failed}.`,
       });
     } catch (error) {
-      setSendResult({ type: "error", message: error.message || "Unable to process the next ticket batch." });
+      if (!outcomeKnown) {
+        if (requestStarted) {
+          setSendBatchState((current) => ({
+            ...current,
+            settings,
+            nextBatchIndex: current?.nextBatchIndex ?? batchIndex,
+            deliveryUnconfirmed: true,
+          }));
+        } else {
+          setSendBatchState((current) => current?.totalRecipients
+            ? { ...current, deliveryUnconfirmed: false }
+            : null);
+        }
+      } else {
+        setSendBatchState((current) => {
+          if (!current || (!current.totalRecipients && Object.keys(current.recipients || {}).length === 0)) return null;
+          return { ...current, deliveryUnconfirmed: false };
+        });
+      }
+      setSendResult({
+        type: "error",
+        message: outcomeKnown
+          ? error.message
+          : requestStarted
+            ? `${error.message || "The server response was lost."} Delivery is unconfirmed; this send is paused to prevent duplicate tickets. Verify the email outcome before starting another send.`
+            : `Could not save progress before sending, so no ticket was sent. ${error.message || ""}`.trim(),
+      });
     } finally {
       batchRequestRef.current = false;
       setSending(false);
     }
   };
 
-  const retryFailedTicketRecipients = async () => {
-    if (!sendJob?._id) return;
-    setSending(true);
-    try {
-      const response = await fetch(`/api/jobs/${encodeURIComponent(sendJob._id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "retry" }),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.message || "Retry failed.");
-      setSendJob(result.job);
-      setSendResult({ type: "success", message: "Eligible failed recipients were requeued; confirmed deliveries will not be resent." });
-    } catch (error) {
-      setSendResult({ type: "error", message: error.message });
-    } finally {
-      setSending(false);
+  const retryFailedTicketRecipients = () => {
+    const failedRecipients = Object.entries(sendBatchState?.recipients || {})
+      .filter(([, recipient]) => recipient.status === "failed")
+      .sort(([, first], [, second]) => first.retryCount - second.retryCount)
+      .slice(0, 10)
+      .map(([email]) => email);
+    if (failedRecipients.length) {
+      sendTicketBatch(sendBatchState.nextBatchIndex, failedRecipients);
     }
   };
 
+  const recipientOutcomes = Object.values(sendBatchState?.recipients || {});
+  const sentCount = recipientOutcomes.filter((recipient) => recipient.status === "success").length;
+  const failedCount = recipientOutcomes.filter((recipient) => recipient.status === "failed").length;
+  const retryCount = Math.min(10, failedCount);
+  const progressCount = recipientOutcomes.length;
+  const nextBatchCount = sendBatchState
+    ? sendBatchState.nextBatchSize
+    : 10;
   const totalSteps = steps.length;
 
   return (
@@ -396,8 +464,10 @@ export default function SendTicketsPage() {
                     <div className="flex gap-2 flex-wrap">
                       {TICKET_TYPES.map((t) => (
                         <button key={t} onClick={() => setSelectedTicketType(t)}
+                          disabled={Boolean(sendBatchState)}
                           className={cn("px-4 py-2 rounded-md text-sm font-medium border transition-colors",
-                            selectedTicketType === t ? "bg-primary text-primary-foreground border-primary" : "bg-transparent border-input hover:bg-accent"
+                            selectedTicketType === t ? "bg-primary text-primary-foreground border-primary" : "bg-transparent border-input hover:bg-accent",
+                            sendBatchState && "cursor-not-allowed opacity-60"
                           )}>{t}</button>
                       ))}
                     </div>
@@ -407,8 +477,10 @@ export default function SendTicketsPage() {
                     <div className="flex gap-2 flex-wrap">
                       {EVENTS.map((e) => (
                         <button key={e} onClick={() => setSelectedEvent(e)}
+                          disabled={Boolean(sendBatchState)}
                           className={cn("px-4 py-2 rounded-md text-sm font-medium border transition-colors",
-                            selectedEvent === e ? "bg-primary text-primary-foreground border-primary" : "bg-transparent border-input hover:bg-accent"
+                            selectedEvent === e ? "bg-primary text-primary-foreground border-primary" : "bg-transparent border-input hover:bg-accent",
+                            sendBatchState && "cursor-not-allowed opacity-60"
                           )}>{e}</button>
                       ))}
                     </div>
@@ -430,10 +502,11 @@ export default function SendTicketsPage() {
                 </CardHeader>
                 <CardContent className="space-y-4">
                   <div
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={() => (!sendBatchState || !ticketFile) && fileInputRef.current?.click()}
                     className={cn(
                       "border-2 border-dashed rounded-lg p-10 flex flex-col items-center justify-center gap-3 cursor-pointer transition-colors",
-                      ticketFile ? "border-primary bg-accent/30" : "border-border hover:border-primary hover:bg-accent/50"
+                      ticketFile ? "border-primary bg-accent/30" : "border-border hover:border-primary hover:bg-accent/50",
+                      sendBatchState && !ticketFile && "cursor-not-allowed opacity-60"
                     )}
                   >
                     {ticketFile ? (
@@ -442,7 +515,7 @@ export default function SendTicketsPage() {
                           {ticketFile.name.split(".").pop().toUpperCase()}
                         </div>
                         <p className="text-sm font-medium">{ticketFile.name}</p>
-                        <p className="text-xs text-muted-foreground">{(ticketFile.size / 1024).toFixed(1)} KB · Click to change</p>
+                        <p className="text-xs text-muted-foreground">{(ticketFile.size / 1024).toFixed(1)} KB{sendBatchState ? "" : " · Click to change"}</p>
                       </>
                     ) : (
                       <>
@@ -455,9 +528,9 @@ export default function SendTicketsPage() {
                     )}
                   </div>
                   <input ref={fileInputRef} type="file" accept=".png,.jpg,.jpeg,.webp" className="hidden"
-                    onChange={handleTicketFileChange} />
+                    onChange={handleTicketFileChange} disabled={Boolean(sendBatchState && ticketFile)} />
                   {ticketFile && (
-                    <button onClick={() => { setTicketFile(null); setTicketPreviewUrl(null); fileInputRef.current.value = ""; }}
+                    <button disabled={Boolean(sendBatchState)} onClick={() => { setTicketFile(null); setTicketPreviewUrl(null); fileInputRef.current.value = ""; }}
                       className="text-xs text-destructive hover:underline">Remove file</button>
                   )}
                 </CardContent>
@@ -581,12 +654,12 @@ QR_Y    = ${qrY}`}
                 <CardContent className="space-y-4">
                   <div className="space-y-1">
                     <label className="text-sm font-medium">Subject</label>
-                    <input type="text" value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)}
+                    <input type="text" value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} readOnly={Boolean(sendBatchState)}
                       className="w-full h-9 rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring" />
                   </div>
                   <div className="space-y-1">
                     <label className="text-sm font-medium">Body</label>
-                    <textarea value={emailBody} onChange={(e) => setEmailBody(e.target.value)} rows={10}
+                    <textarea value={emailBody} onChange={(e) => setEmailBody(e.target.value)} rows={10} readOnly={Boolean(sendBatchState)}
                       className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring resize-y" />
                   </div>
                 </CardContent>
@@ -624,16 +697,7 @@ QR_Y    = ${qrY}`}
                     </div>
                   </div>
 
-                    <label className="flex items-center gap-3 text-sm">
-                      <span className="font-medium">Recipients per batch</span>
-                      <select value={batchSize} onChange={(e) => setBatchSize(e.target.value)}
-                        className="h-9 rounded-md border border-input bg-transparent px-3">
-                        {Array.from({ length: 5 }, (_, index) => index + 1).map((size) => (
-                          <option key={size} value={size}>{size}</option>
-                        ))}
-                      </select>
-                      <span className="text-muted-foreground">Maximum 5 until larger batches are verified; default 5</span>
-                    </label>
+                  <p className="text-sm text-muted-foreground">Recipients are sent in stable email order, 10 at a time. You can retry confirmed failures without resending successful tickets.</p>
 
                     {sendResult && (
                     <div className={cn(
@@ -646,48 +710,60 @@ QR_Y    = ${qrY}`}
                     </div>
                   )}
 
-                  {sendJob && (
+                  {sendBatchState && (
                     <div className="space-y-2 rounded-lg border border-border p-4 text-sm" aria-live="polite">
-                      <div className="font-semibold">Ticket job · {sendJob.status}</div>
+                      <div className="font-semibold">Ticket batch progress</div>
                       <p>
-                        Batch {sendJob.currentBatch || 1} · Processed {sendJob.processedCount || 0} / {sendJob.recipientCount}
-                        {" · "}Pending {sendJob.pendingCount || 0}
-                        {" · "}Processing {sendJob.processingCount || 0}
-                        {" · "}Sent {sendJob.successfulCount || 0}
-                        {" · "}Failed {sendJob.failedCount || 0}
-                        {" · "}Unknown {sendJob.unknownCount || 0}
+                        Processed {progressCount} / {sendBatchState.totalRecipients}
+                        {" · "}Sent {sentCount}
+                        {" · "}Failed {failedCount}
+                        {" · "}Next batch {sendBatchState.nextBatchIndex + 1}
                       </p>
-                      <progress className="h-2 w-full" value={sendJob.processedCount || 0} max={sendJob.recipientCount || 1} />
-                      {sendJob.unknownCount > 0 && (
+                      <progress className="h-2 w-full" value={progressCount} max={sendBatchState.totalRecipients || 1} />
+                      {sendBatchState.deliveryUnconfirmed && (
                         <p className="text-amber-700">
-                          Some delivery outcomes are unknown. Verify those messages with the provider before manually resending.
+                          This batch outcome could not be confirmed. Sending is paused to avoid duplicate tickets; verify delivery before proceeding.
                         </p>
                       )}
-                      {["PENDING", "RUNNING", "RETRY_WAIT"].includes(sendJob.status) && (
-                        <Button
-                          variant="outline"
-                          onClick={processNextTicketBatch}
-                          disabled={restoringJob || sending
-                            || (sendJob.leaseUntil && new Date(sendJob.leaseUntil).getTime() > Date.now())
-                            || (sendJob.nextAttemptAt && new Date(sendJob.nextAttemptAt).getTime() > Date.now())}
-                        >
-                          {sending ? "Processing batch..." : sendJob.nextAttemptAt && new Date(sendJob.nextAttemptAt).getTime() > Date.now() ? "Retry waiting..." : "Process Next Batch"}
+                      {recipientOutcomes.length > 0 && (
+                        <ul className="max-h-48 space-y-1 overflow-y-auto border-t border-border pt-2">
+                          {Object.entries(sendBatchState.recipients).map(([email, recipient]) => (
+                            <li key={email} className="flex flex-wrap justify-between gap-x-3">
+                              <span>{email}</span>
+                              <span className={recipient.status === "success" ? "text-green-700" : "text-destructive"}>
+                                {recipient.status === "success" ? "Sent" : `Failed${recipient.reason ? `: ${recipient.reason}` : ""}`}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {!sendBatchState.deliveryUnconfirmed && (sendBatchState.hasMore || !sendBatchState.totalRecipients) && (
+                        <Button variant="outline" onClick={() => sendTicketBatch(sendBatchState.nextBatchIndex)} disabled={restoringBatch || sending || !ticketFile}>
+                          {sending ? "Sending batch..." : `Send Next Batch (10)${sendBatchState.totalRecipients ? ` · ${nextBatchCount} recipients` : ""}`}
                         </Button>
                       )}
-                      {["PARTIAL", "FAILED"].includes(sendJob.status)
-                        && sendJob.recipients?.some((recipient) => recipient.status === "FAILED" && recipient.retryable)
-                        && (
-                          <Button variant="outline" onClick={retryFailedTicketRecipients} disabled={sending}>
-                            Retry eligible failures
-                          </Button>
-                        )}
+                      {!sendBatchState.deliveryUnconfirmed && failedCount > 0 && (
+                        <Button variant="outline" onClick={retryFailedTicketRecipients} disabled={restoringBatch || sending || !ticketFile}>
+                          {sending ? "Retrying..." : `Retry Failed Recipients (${retryCount})`}
+                        </Button>
+                      )}
                     </div>
                   )}
 
-                  <Button className="w-full" onClick={handleSend} disabled={restoringJob || sending || !ticketFile || ["PENDING", "RUNNING", "RETRY_WAIT"].includes(sendJob?.status)}>
-                    <Send className="h-4 w-4 mr-2" />
-                    {sending ? "Queueing Ticket Job..." : "Send Tickets to Participants"}
-                  </Button>
+                  {!sendBatchState && (
+                    <Button className="w-full" onClick={() => sendTicketBatch(0)} disabled={restoringBatch || sending || !ticketFile}>
+                      <Send className="h-4 w-4 mr-2" />
+                      {sending ? "Sending batch..." : "Send Next Batch (10)"}
+                    </Button>
+                  )}
+                  {sendBatchState && !sendBatchState.hasMore && failedCount === 0 && !sendBatchState.deliveryUnconfirmed && (
+                    <Button className="w-full" variant="outline" onClick={() => {
+                      setSendBatchState(null);
+                      setSendResult(null);
+                    }}>
+                      Start a New Ticket Send
+                    </Button>
+                  )}
                 </CardContent>
               </>
             )}
