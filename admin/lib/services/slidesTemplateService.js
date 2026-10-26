@@ -125,11 +125,10 @@ export async function validateSlidesTemplate(
 
   if (
     !qrPlaceholder &&
-    (tokens.includes("ticket.id") ||
-      tokens.includes("ticket.qr"))
+    tokens.includes("ticket.qr")
   ) {
     throw new Error(
-      "Certificate templates must not contain ticket ID or QR placeholders."
+      "Certificate templates must not contain QR placeholders."
     );
   }
 
@@ -195,6 +194,7 @@ export async function createPersonalizedPdf({
   templateUrl,
   context,
   qrPlaceholder = "",
+  requireTicketId = true,
   onTemporaryFile = async () => {},
 }) {
   if (!templateUrl) {
@@ -203,12 +203,21 @@ export async function createPersonalizedPdf({
     );
   }
 
-  const result =
-    await generatePdfWithAppsScript({
-      templateUrl,
-      context,
-      qrPlaceholder,
-    });
+  const resolvedContext = requireTicketId
+    ? context
+    : {
+        ...context,
+        ticket: {
+          ...context.ticket,
+          id: context.ticket?.id || "",
+        },
+      };
+  const result = await generatePdfWithAppsScript({
+    templateUrl,
+    context: resolvedContext,
+    qrPlaceholder,
+    requireTicketId,
+  });
 
   return {
     pdf: result.pdf,

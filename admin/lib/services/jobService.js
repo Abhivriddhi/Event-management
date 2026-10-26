@@ -120,7 +120,12 @@ export async function createOperationJob({
   const validationTicketId = willHaveTicket ? "VALIDATION-TICKET-ID" : "";
   const sampleContext = getEmailContext(sample, event, validationTicketId);
   const emailPaths = new Set(getParticipantPaths(sample));
-  const validEmailTokens = new Set([...emailPaths, "event.name", ...(willHaveTicket ? ["ticket.id"] : [])]);
+  const mayUseExistingTicketId = type === "certificate" || (type === "email" && attachmentKind === "certificate");
+  const validEmailTokens = new Set([
+    ...emailPaths,
+    "event.name",
+    ...(willHaveTicket || mayUseExistingTicketId ? ["ticket.id"] : []),
+  ]);
   const usedEmailTokens = getTemplateTokens(`${emailSubject}\n${emailHtml}`);
   const invalidEmailTokens = usedEmailTokens.filter((token) => !validEmailTokens.has(token));
   if (invalidEmailTokens.length) {
@@ -306,7 +311,16 @@ async function prepareEventDelivery(job, recipient, leaseId, index, event) {
     if (!update.matchedCount) throw new Error("Job lease was lost before delivery preparation completed.");
   }
 
-  const context = getEmailContext(recipient.participant, event, recipient.ticketId);
+  let ticketId = recipient.ticketId || "";
+  const isCertificateDelivery = job.type === "certificate" || (job.type === "email" && job.attachmentKind === "certificate");
+  if (isCertificateDelivery && !ticketId && recipient.participant.prn) {
+    const ticket = await Ticket.findOne({
+      eventId: event.eventId,
+      prn: recipient.participant.prn,
+    }).select("ticketId").lean();
+    ticketId = ticket?.ticketId || "";
+  }
+  const context = getEmailContext(recipient.participant, event, ticketId);
   const attachments = job.otherAttachment?.content
     ? [{
         filename: job.otherAttachment.filename || "attachment",
@@ -321,6 +335,7 @@ async function prepareEventDelivery(job, recipient, leaseId, index, event) {
       templateUrl: recipient.templateUrl,
       context: { ...context, ticket: { id: recipient.ticketId, qr: "" } },
       qrPlaceholder: event.ticketSettings?.qrPlaceholder || "{{ticket.qr}}",
+      requireTicketId: true,
       onTemporaryFile: async (fileId, removed = false) => {
         const filter = {
           _id: job._id,
@@ -339,6 +354,7 @@ async function prepareEventDelivery(job, recipient, leaseId, index, event) {
     const generated = await createPersonalizedPdf({
       templateUrl: job.templateUrl,
       context,
+      requireTicketId: false,
       onTemporaryFile: async (fileId, removed = false) => {
         const filter = {
           _id: job._id,

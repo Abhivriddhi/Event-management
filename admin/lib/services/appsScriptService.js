@@ -2,6 +2,7 @@ export async function generatePdfWithAppsScript({
   templateUrl,
   context,
   qrPlaceholder = "",
+  requireTicketId = true,
 }) {
   const url =
     process.env.GOOGLE_APPS_SCRIPT_URL;
@@ -31,6 +32,7 @@ export async function generatePdfWithAppsScript({
       templateUrl,
       context,
       qrPlaceholder,
+      requireTicketId,
     }),
     cache: "no-store",
     signal: AbortSignal.timeout(20_000),

@@ -216,8 +216,11 @@ function validateRequest(body) {
   }
 
   if (
-    !body.context.ticket ||
-    !body.context.ticket.id
+    body.requireTicketId !== false &&
+    (
+      !body.context.ticket ||
+      !body.context.ticket.id
+    )
   ) {
     throw new Error(
       "context.ticket.id is required."
